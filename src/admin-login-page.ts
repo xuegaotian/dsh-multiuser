@@ -1,0 +1,4 @@
+/** Render the isolated local-administrator sign-in page. */
+export function adminLoginPageHtml(): string {
+  return '<!doctype html><meta charset="utf-8"><title>DSH Administrator Login</title><form id="login"><label>Username <input name="username" autocomplete="username" required></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button><p id="error" role="alert"></p></form><script>document.querySelector("form").addEventListener("submit",async event=>{event.preventDefault();const form=new FormData(event.currentTarget);const response=await fetch("/admin/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(Object.fromEntries(form))});if(response.ok)location.href="/admin";else document.querySelector("#error").textContent="Sign-in failed"})</script>'
+}

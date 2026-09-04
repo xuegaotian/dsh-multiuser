@@ -1,0 +1,27 @@
+# Gateway authenticates the request and routes it to this user's DSH Runtime.
+# DSH APIs remain available normally; the Runtime's DSH_HOME is per-user.
+- id: web-runtime
+  config:
+    openBrowser: false
+    # The Gateway captures this URL for the internal token exchange; SSH_CONNECTION
+    # prevents the embedded Runtime from opening a browser.
+    printUrl: true
+    surfaceContext: true
+    trustedHosts: []
+- id: webserver
+  config:
+    host: !!js ctx.webStartup.host ?? '127.0.0.1'
+    port: !!js ctx.webStartup.port ?? 0
+- id: connection
+  config:
+    trustedHosts: !!js ctx.webRuntime.trustedHosts
+# The shared DSH_AGENTS_HOME is the deployment-owned source for public Skills.
+# Keep both the catalog provider and model-facing loader available in user runtimes.
+- id: skill-filesystem
+  disabled: false
+- id: tool-skill
+  disabled: false
+# Administrators provide these routes through the gateway-owned environment.
+- id: llm-pi-ai
+  config:
+    providers: !!js JSON.parse(process.env.DSH_PUBLIC_LLM_PROVIDERS || '{}')

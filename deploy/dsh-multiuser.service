@@ -1,0 +1,35 @@
+[Unit]
+Description=DSH Multi-user Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=dsh-multiuser
+Group=dsh-multiuser
+WorkingDirectory=/srv/dsh-multiuser/app
+EnvironmentFile=/etc/dsh-multiuser/gateway.env
+ExecStart=/usr/bin/node /srv/dsh-multiuser/app/dist/src/gateway-cli.js \
+  --db /srv/dsh-multiuser/data/gateway.sqlite \
+  --data-root /srv/dsh-multiuser/data/users \
+  --dsh-command /usr/bin/node \
+  --dsh-args '[]' \
+  --launcher-cwd /srv/deepseek-harness \
+  --launcher-entry /srv/deepseek-harness/apps/cli/lib/bin.js \
+  --profile user-runtime \
+  --profile-source /srv/dsh-multiuser/app/profiles/user-runtime \
+  --host 127.0.0.1 \
+  --port 18088 \
+  --allowed-host dsh.example.com
+# Optional SSO sign-in (Ed25519 JWT). Uncomment and fill in your IdP values:
+#  --sso-public-key sso-2026-01=/etc/dsh-multiuser/keys/sso-2026-01.pem \
+#  --sso-issuer example-idp \
+#  --sso-audience dsh-multiuser \
+#  --sso-origin https://sso.example.internal \
+#  --sso-session-minutes 60
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
