@@ -1,6 +1,6 @@
 # DSH 兼容升级
 
-状态：已实施（2026-09-15，DSH `0.1.5-rc.1` 主验证 + `0.1.6-alpha.1` 前瞻验证）  
+状态：已实施（2026-09-17，DSH `0.1.5-rc.1`/`0.1.5-rc.2` 主验证 + `0.1.6-alpha.1`/`0.1.6-alpha.2` 前瞻验证）  
 目标：建立可重复的 DSH 版本兼容策略，并对真实 Runtime 链路进行验收。
 
 实施结果：
@@ -12,14 +12,14 @@
 
 ## 当前基线
 
-截至 2026-09-15：
+截至 2026-09-17：
 
 | 项目 | 版本 | 意义 |
 | --- | --- | --- |
 | 本地已验证 Harness checkout | `0.1.2-alpha.1` | 当前项目代码主要基线 |
-| npm `latest` | `0.1.5-rc.1` | 首次开源发布必须通过的用户默认版本 |
-| npm `next` | `0.1.5-rc.2` | 可选支持版本 |
-| npm `alpha` 与最新 Git 标签 | `0.1.6-alpha.1` | 前瞻兼容信号，首发时可允许失败 |
+| npm `latest` | `0.1.5-rc.2` | 首次开源发布必须通过的用户默认版本（真实 Runtime 集成测试 11/11 通过） |
+| npm `next` | `0.1.5-rc.2` | 与 `latest` 同版本 |
+| npm `alpha` | `0.1.6-alpha.2` | 前瞻兼容信号，首发时可允许失败（集成测试 11/11 通过） |
 
 每次开始升级前重新查询，不复制上表作为当前事实：
 
@@ -45,7 +45,7 @@ npm view @deepseek-ai/dsh versions --json
 mkdir -p ./compat-work
 cd ./compat-work
 npm init -y
-npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.1
+npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.2
 npx dsh --version
 ```
 
@@ -168,8 +168,8 @@ CI 在日志开头打印 Node、pnpm、DSH 和本项目版本。测试不读取�
 
 ```json
 {
-  "testedDshVersions": ["0.1.5-rc.1"],
-  "canaryDshVersions": ["0.1.6-alpha.1"],
+  "testedDshVersions": ["0.1.5-rc.1", "0.1.5-rc.2"],
+  "canaryDshVersions": ["0.1.6-alpha.1", "0.1.6-alpha.2"],
   "node": "^22.19.0 || >=24.0.0"
 }
 ```
@@ -178,8 +178,8 @@ CI 在日志开头打印 Node、pnpm、DSH 和本项目版本。测试不读取�
 
 ## 完成标准
 
-- [x] npm `latest` 版本的真实 Runtime、HTTP、WebSocket、认证和 Profile 合并测试全部通过（`0.1.5-rc.1`，`pnpm test:integration` 11/11 通过）。
+- [x] npm `latest` 版本的真实 Runtime、HTTP、WebSocket、认证和 Profile 合并测试全部通过（`0.1.5-rc.1` 与 `0.1.5-rc.2`，`pnpm test:integration` 各 11/11 通过）。
 - [x] 两名用户的验收证明会话、Runtime Cookie 和端口互不可见（`test/harness-latest.integration.test.ts` 的 two-user isolation 用例；完整浏览器隔离验收属于手册第 4 章发布验收范围）。
-- [x] README 和 `compatibility.json` 仅声明已实测版本（`0.1.5-rc.1` 与前瞻验证的 `0.1.6-alpha.1`）。
-- [x] alpha（`0.1.6-alpha.1`）当前通过全部集成测试，无需创建兼容 Issue；CI 的 `integration-alpha` 作业会在未来 alpha 破坏兼容时以非阻断方式暴露失败。
+- [x] README 和 `compatibility.json` 仅声明已实测版本（`0.1.5-rc.1`、`0.1.5-rc.2` 与前瞻验证的 `0.1.6-alpha.1`、`0.1.6-alpha.2`）。
+- [x] alpha（`0.1.6-alpha.2`）当前通过全部集成测试，无需创建兼容 Issue；CI 的 `integration-alpha` 作业会在未来 alpha 破坏兼容时以非阻断方式暴露问题。
 

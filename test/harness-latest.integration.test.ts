@@ -21,7 +21,7 @@ import { prepareUserProfile } from '../src/user-profile.js'
  *
  * ```sh
  * mkdir -p compat-work && cd compat-work
- * npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.1
+ * npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.2
  * DSH_INTEGRATION_BIN="$PWD/node_modules/.bin/dsh" pnpm test:integration
  * ```
  *

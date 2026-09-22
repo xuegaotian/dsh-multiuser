@@ -575,7 +575,12 @@ export async function copyAppTree(target: string): Promise<void> {
   }
   if (existsSync(join(root, 'deploy'))) await cp(join(root, 'deploy'), join(target, 'deploy'), { recursive: true })
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
-  await writeFile(join(target, 'package.json'), `${JSON.stringify({ ...manifest, devDependencies: undefined }, undefined, 2)}\n`)
+  // The installed app tree exists only to run prebuilt output; it never builds.
+  // `prepare` is a source-install hook, so carrying it into the deployed app
+  // would make a later `npm install` there try to run tsc over absent sources.
+  const scripts = { ...(manifest.scripts as Record<string, string> | undefined) }
+  delete scripts.prepare
+  await writeFile(join(target, 'package.json'), `${JSON.stringify({ ...manifest, scripts, devDependencies: undefined }, undefined, 2)}\n`)
   await chmod(join(target, 'dist/src/cli.js'), 0o755).catch(() => undefined)
 }
 

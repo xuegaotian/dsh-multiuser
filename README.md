@@ -8,7 +8,7 @@
 
 当前实现通用 Ed25519 SSO 普通用户会话、独立本地管理员会话、单机 Runtime Manager、认证网关和管理员只读管理入口。普通用户必须向 `/auth/sso` 提交由可信 IdP 签发的短期 JWT；管理员仅通过 `/admin/login` 使用本地密码登录，两种 Cookie 互不覆盖。
 
-> **支持版本**：本版本已实测 DeepSeek Harness `0.1.5-rc.1`（npm `latest`，通过真实 Runtime 集成测试）与 `0.1.6-alpha.1`（npm `alpha`，前瞻验证）。精确的已验证版本列表见 [`compatibility.json`](compatibility.json)；不支持早于 `0.1.5-rc.1` 的版本。CI 通过 `unit`、`integration-latest`、`integration-alpha` 三类作业保持该矩阵（见 [CI 工作流](.github/workflows/ci.yml)）。
+> **支持版本**：本版本已实测 DeepSeek Harness `0.1.5-rc.1` 与 `0.1.5-rc.2`（npm `latest`，均通过真实 Runtime 集成测试 11/11）以及 `0.1.6-alpha.1`、`0.1.6-alpha.2`（npm `alpha`，前瞻验证）。精确的已验证版本列表见 [`compatibility.json`](compatibility.json)；不支持早于 `0.1.5-rc.1` 的版本。CI 通过 `unit`、`integration-latest`、`integration-alpha` 三类作业保持该矩阵（见 [CI 工作流](.github/workflows/ci.yml)）。
 
 > **安全边界**：本项目提供每用户目录、会话和 Runtime 进程路由，但**不是**对抗恶意租户的操作系统级沙箱。当前版本面向可信内部用户。不要把本方案当作强多租户隔离。
 
@@ -47,10 +47,10 @@ pnpm build
 ```sh
 mkdir -p compat-work && cd compat-work
 npm init -y >/dev/null
-npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.1
+npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.2
 cd ..
 DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh" \
-DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
+DSH_INTEGRATION_VERSION="0.1.5-rc.2" \
   pnpm test:integration
 ```
 
@@ -69,7 +69,7 @@ DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
    ```sh
    mkdir dsh-multiuser-deploy && cd dsh-multiuser-deploy
    npm init -y >/dev/null
-   npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.1
+   npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.2
    ```
 
    在本仓库目录中执行（密码交互输入，不进入命令行）：
@@ -78,6 +78,8 @@ DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
    pnpm install
    pnpm dsh-multiuser init-admin --db ./data/gateway.sqlite --username admin --display-name Admin
    ```
+
+   `init-admin` 会自动创建 `--db` 的父目录，因此首次运行不需要手工 `mkdir -p data`。若你的部署脚本希望数据目录权限受控，也可以先自行创建并设置权限。
 
 2. 启动网关（本机开发，直接使用 npm 安装的 `dsh` 命令，无需 `--launcher-entry`）：
 

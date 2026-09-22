@@ -165,9 +165,9 @@ git diff --check
 
 ```sh
 mkdir -p compat-work
-npm install --prefix compat-work --save-exact @deepseek-ai/dsh@0.1.5-rc.1
+npm install --prefix compat-work --save-exact @deepseek-ai/dsh@0.1.5-rc.2
 DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh" \
-DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
+DSH_INTEGRATION_VERSION="0.1.5-rc.2" \
   pnpm test:integration
 ```
 
@@ -178,7 +178,7 @@ RELEASE_PACK_DIR=$(mktemp -d)
 pnpm pack --pack-destination "$RELEASE_PACK_DIR"
 DSH_PACK_DIR="$RELEASE_PACK_DIR" \
 DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh" \
-DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
+DSH_INTEGRATION_VERSION="0.1.5-rc.2" \
   pnpm vitest run test/install-pack.integration.test.ts
 npm pack --dry-run
 ```

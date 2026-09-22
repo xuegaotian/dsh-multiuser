@@ -16,8 +16,8 @@
 
 ### 1. DeepSeek Harness 兼容性
 
-- [x] 支持 npm `latest` 指向的 DSH 版本。截至 2026-09-15，该版本是 `0.1.5-rc.1`（真实 Runtime 集成测试 11/11 通过）。
-- [x] 对 npm `alpha` 指向的最新预发布版执行前瞻测试。截至 2026-09-15，该版本是 `0.1.6-alpha.1`（集成测试同样通过）。
+- [x] 支持 npm `latest` 指向的 DSH 版本。截至 2026-09-17，该版本是 `0.1.5-rc.2`（真实 Runtime 集成测试 11/11 通过）。
+- [x] 对 npm `alpha` 指向的最新预发布版执行前瞻测试。截至 2026-09-17，该版本是 `0.1.6-alpha.2`（集成测试同样通过）。
 - [x] 真实 DSH Runtime 集成测试进入 CI，不再只使用 `FakeRuntimeProvider`（`.github/workflows/ci.yml` 的 `integration-latest` / `integration-alpha` 作业）。
 - [x] 发布版本声明精确支持的 DSH 范围，不使用“最新版”作为模糊承诺（`compatibility.json` + README 支持版本声明）。
 

@@ -8,7 +8,7 @@
 本手册使用尖括号占位符表示必须由维护者替换的内容。所有形如 `<...>` 的标记在真实部署前都必须替换为实际值，不得原样执行：
 
 - `<网关域名>`：对外访问的 HTTPS 主机名，例如 `dsh.example.com`。
-- `<DSH 精确版本>`：`compatibility.json` 中 `testedDshVersions` 列出的已测版本，例如 `0.1.5-rc.1`。**这是 `@deepseek-ai/dsh` 的版本，只用于 `npm install --global @deepseek-ai/dsh@<DSH 精确版本>`。**
+- `<DSH 精确版本>`：`compatibility.json` 中 `testedDshVersions` 列出的已测版本，例如 `0.1.5-rc.2`。**这是 `@deepseek-ai/dsh` 的版本，只用于 `npm install --global @deepseek-ai/dsh@<DSH 精确版本>`。**
 - `<应用版本>`：`package.json` 的 `version`（写作时为 `0.1.0`）。**这是 `dsh-multiuser` 自身发布包的版本，与 `<DSH 精确版本>` 是两个不同的东西。** 安装 dsh-multiuser 时必须写成 `dsh-multiuser@<应用版本>`；写错成 DSH 的版本会 404。升级/重装目标用 `<新应用版本>`，回滚目标用 `<旧应用版本>`——两者是同一个包的不同发布版本，但**回滚的 `<旧应用版本>` 必须与升级前数据备份的 Schema 版本对齐**（高危操作，填错会导致旧二进制打不开新 Schema）。
 - `<dsh 可执行路径>`：全局安装的 `dsh` 二进制绝对路径，例如 `/usr/bin/dsh`。
 - `<IdP issuer>` / `<IdP audience>` / `<IdP origin>`：可信 IdP 的 issuer、audience 与精确 origin。
@@ -475,7 +475,7 @@ sudo -u dsh-multiuser /opt/dsh-multiuser/bin/dsh-multiuser status \
 ```text
 healthz: ok
 readyz: ready
-version: {"name":"dsh-multiuser","version":"0.1.0","commit":null,"dsh":{"tested":["0.1.5-rc.1"],"canary":["0.1.6-alpha.1"]},"node":"v24.18.0"}
+version: {"name":"dsh-multiuser","version":"0.1.0","commit":null,"dsh":{"tested":["0.1.5-rc.1","0.1.5-rc.2"],"canary":["0.1.6-alpha.1","0.1.6-alpha.2"]},"node":"v24.18.0"}
 admin account: initialized
 ```
 

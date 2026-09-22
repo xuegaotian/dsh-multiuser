@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { stdin, stdout } from 'node:process'
-import { chmod, readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { chmod, mkdir, readFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
 import { Command } from 'commander'
 import { AuthStore, type Role } from './auth-local.js'
 import { installUserRuntimeProfile } from './profile-install.js'
@@ -50,6 +50,12 @@ async function readPassword(options: CommonOptions): Promise<string> {
 }
 
 async function run(action: (auth: AuthStore) => Promise<void> | void, db: string): Promise<void> {
+  // Create the database's parent directory on demand. A fresh clone has no
+  // data/ directory yet, and SQLite refuses to create a file inside a missing
+  // directory ("unable to open database file"), which made the documented
+  // quick start fail on its first command. Creating the parent keeps
+  // `init-admin --db ./data/gateway.sqlite` working without a manual mkdir.
+  await mkdir(dirname(resolve(db)), { recursive: true })
   const auth = new AuthStore(db)
   try { await action(auth) } finally { auth.close() }
 }
@@ -234,7 +240,7 @@ environmentOptions(program.command('status')
   .action(async (options: ServiceControlOptions & { hostHeader?: string }) => { await runStatus(options) })
 
 environmentOptions(program.command('start')
-  .description('print the exact gateway command to start the service (local mode)'))
+  .description('print the exact gateway command to start the service; does not daemonize (local mode)'))
   .requiredOption('--db <path>', 'SQLite database path')
   .requiredOption('--data-root <path>', 'per-user data root')
   .requiredOption('--profile-source <path>', 'versioned user-runtime Profile directory')
@@ -246,7 +252,8 @@ environmentOptions(program.command('start')
   .action(async (options: Omit<ServiceControlOptions, 'allowedHost'> & { allowedHost?: string[] }) => {
     const argv = gatewayArgv({ ...options, allowedHost: options.allowedHost?.[0] })
     stdout.write(`node dist/src/gateway-cli.js ${argv.join(' ')}\n`)
-    stdout.write('run this from the application directory (or use the systemd unit in systemd mode)\n')
+    stdout.write('this command only prints the line above; it does not start or daemonize anything.\n')
+    stdout.write('run it from the application directory yourself, or use install --mode systemd and systemctl.\n')
   })
 
 program.command('backup')

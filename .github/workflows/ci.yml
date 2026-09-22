@@ -209,13 +209,13 @@ jobs:
           mkdir -p compat-work
           cd compat-work
           npm init -y >/dev/null
-          npm install --save-exact "@deepseek-ai/dsh@0.1.5-rc.1"
+          npm install --save-exact "@deepseek-ai/dsh@0.1.5-rc.2"
           cd ..
           DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh"
           test -x "$DSH_INTEGRATION_BIN" || { echo "::error::DSH_INTEGRATION_BIN is missing or not executable: $DSH_INTEGRATION_BIN"; exit 1; }
           DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh" \
           DSH_PACK_DIR="$PACK_DIR" \
-          DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
+          DSH_INTEGRATION_VERSION="0.1.5-rc.2" \
             pnpm vitest run test/install-pack.integration.test.ts
 
       - name: Ensure doctor and --help created no data directories
