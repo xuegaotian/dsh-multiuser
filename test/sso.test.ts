@@ -11,7 +11,7 @@ beforeAll(async () => {
   const pair = await generateKeyPair('EdDSA')
   privateKey = pair.privateKey
   publicKey = pair.publicKey
-  verifier = new SsoVerifier({ issuer: 'example-idp', audience: 'dsh-multiuser', allowedOrigin: 'https://sso.example.internal', keys: new Map([['sso-2026-01', publicKey]]), now: () => now })
+  verifier = new SsoVerifier({ issuer: 'example-idp', audience: 'dsh-multiuser', allowedOrigin: 'https://sso.example.com', keys: new Map([['sso-2026-01', publicKey]]), now: () => now })
 })
 
 async function token(claims: Record<string, unknown> = {}, header: Record<string, unknown> = {}): Promise<string> {

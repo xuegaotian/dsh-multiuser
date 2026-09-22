@@ -25,13 +25,13 @@ describe('GlobalConfigStore', () => {
     const store = new GlobalConfigStore(join(directory, 'gateway.env'))
     await store.save({
       apiKey: 'shared-key',
-      providers: [{ provider: 'holly', api: 'openai-completions', baseURL: 'https://example.test/v1', models: [{ id: 'glm-5.3' }], apiKey: 'holly-key' }],
+      providers: [{ provider: 'acme', api: 'openai-completions', baseURL: 'https://example.test/v1', models: [{ id: 'glm-5.3' }], apiKey: 'acme-key' }],
     })
 
     const environment = await store.runtimeEnvironment()
     const providers = JSON.parse(environment.DSH_PUBLIC_LLM_PROVIDERS!) as Record<string, Record<string, unknown>>
-    expect(providers.holly).toMatchObject({ apiKeyEnv: 'DSH_PUBLIC_LLM_KEY_HOLLY', api: 'openai-completions', baseURL: 'https://example.test/v1' })
-    expect(providers.holly).not.toHaveProperty('provider')
+    expect(providers.acme).toMatchObject({ apiKeyEnv: 'DSH_PUBLIC_LLM_KEY_ACME', api: 'openai-completions', baseURL: 'https://example.test/v1' })
+    expect(providers.acme).not.toHaveProperty('provider')
   })
 })
 

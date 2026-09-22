@@ -8,6 +8,8 @@
 
 当前实现通用 Ed25519 SSO 普通用户会话、独立本地管理员会话、单机 Runtime Manager、认证网关和管理员只读管理入口。普通用户必须向 `/auth/sso` 提交由可信 IdP 签发的短期 JWT；管理员仅通过 `/admin/login` 使用本地密码登录，两种 Cookie 互不覆盖。
 
+> **支持版本**：本版本已实测 DeepSeek Harness `0.1.5-rc.1`（npm `latest`，通过真实 Runtime 集成测试）与 `0.1.6-alpha.1`（npm `alpha`，前瞻验证）。精确的已验证版本列表见 [`compatibility.json`](compatibility.json)；不支持早于 `0.1.5-rc.1` 的版本。CI 通过 `unit`、`integration-latest`、`integration-alpha` 三类作业保持该矩阵（见 [CI 工作流](.github/workflows/ci.yml)）。
+
 > **安全边界**：本项目提供每用户目录、会话和 Runtime 进程路由，但**不是**对抗恶意租户的操作系统级沙箱。当前版本面向可信内部用户。不要把本方案当作强多租户隔离。
 
 ## 功能
@@ -40,31 +42,51 @@ pnpm typecheck
 pnpm build
 ```
 
+`pnpm test` 只运行单元测试（不依赖真实 DSH）。真实 DSH Runtime 集成测试通过 `pnpm test:integration` 运行，需要先用 `DSH_INTEGRATION_BIN` 指向一个已安装的 `dsh` 可执行文件：
+
+```sh
+mkdir -p compat-work && cd compat-work
+npm init -y >/dev/null
+npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.1
+cd ..
+DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh" \
+DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
+  pnpm test:integration
+```
+
+集成测试覆盖：Runtime 启动与 token 交换、`dsh-auth-*` Cookie 认证、`/api` RPC envelope（`session/list`、`session/search`、`session/page`、`session/create`、`subagents/list`）、`/api/remote.mux` WebSocket、双用户隔离，以及完整 Gateway（SSO 登录 → 启动用户 Runtime → 代理 HTTP/RPC/WebSocket）链路。所有测试 home 都在临时目录中，不会读写维护者的默认 `DSH_HOME`。
+
+## 开源发布准备
+
+本仓库尚未完成正式公开发布验收。DSH 版本兼容（手册第 1 章）已完成：真实 Runtime 集成测试与 CI 矩阵已落地，见 [DSH 兼容升级](docs/open-source-release/01-dsh-compatibility.md)。维护者请继续从 [开源发布实施手册](docs/open-source-release/README.md) 第 2 章开始，依次完成发布包安装、生产部署和发布验收。手册中标记为“待实施”的命令和产物是发布目标，不代表当前代码已提供。
+
 ## 快速开始
 
-1. 准备 DSH 的构建目录：
+推荐使用 npm 发布的 `dsh` CLI（无需本地 Harness checkout）：
+
+1. 安装指定版本的 DSH 并初始化管理员账号：
+
+   ```sh
+   mkdir dsh-multiuser-deploy && cd dsh-multiuser-deploy
+   npm init -y >/dev/null
+   npm install --save-exact @deepseek-ai/dsh@0.1.5-rc.1
+   ```
+
+   在本仓库目录中执行（密码交互输入，不进入命令行）：
 
    ```sh
    pnpm install
-   pnpm --dir /path/to/deepseek-harness build
-   ```
-
-2. 初始化管理员账号（密码交互输入，不进入命令行）：
-
-   ```sh
    pnpm dsh-multiuser init-admin --db ./data/gateway.sqlite --username admin --display-name Admin
    ```
 
-3. 启动网关（本机开发）：
+2. 启动网关（本机开发，直接使用 npm 安装的 `dsh` 命令，无需 `--launcher-entry`）：
 
    ```sh
    pnpm gateway \
      --db ./data/gateway.sqlite \
      --data-root ./data/users \
-     --dsh-command node \
+     --dsh-command "$PWD/../dsh-multiuser-deploy/node_modules/.bin/dsh" \
      --dsh-args '[]' \
-     --launcher-cwd /path/to/deepseek-harness \
-     --launcher-entry /path/to/deepseek-harness/apps/cli/lib/bin.js \
      --profile user-runtime \
      --profile-source ./profiles/user-runtime \
      --host 127.0.0.1 \
@@ -81,6 +103,48 @@ pnpm build
    ```
 
 本机开发使用 `--insecure-cookies`；生产环境移除该选项并由 Ingress 提供 HTTPS。
+
+也可以继续使用本地 Harness checkout 方式（`--launcher-cwd` + `--launcher-entry` 指向 checkout 的 `apps/cli/lib/bin.js`），两种方式都受支持；npm 方式不需要维护 checkout。
+
+## 安装、检查与卸载（dsh-multiuser CLI）
+
+发布包提供生命周期命令（详见 `dsh-multiuser <command> --help`）：
+
+```sh
+# 只读环境检查：Node/DSH 版本、compatibility.json 匹配、目录权限、
+# Profile 真实 --dump-config 组合验证、SSO 完整性、安全 Cookie 提醒。
+# 稳定结果码（NODE_VERSION、DSH_COMPATIBILITY、PROFILE_COMPOSITION、
+# SSO_CONFIG 等）便于脚本处理；--json 输出机器可读格式；不创建任何文件。
+dsh-multiuser doctor \
+  --dsh-command /path/to/dsh \
+  --db /srv/dsh-multiuser/data/gateway.sqlite \
+  --data-root /srv/dsh-multiuser/data/users \
+  --profile-source /srv/dsh-multiuser/app/profiles/user-runtime
+
+# 幂等安装：staging → 真实 --dump-config 验证 → 原子替换应用目录，
+# 数据目录保留；重复执行不覆盖账号与数据；--dry-run 只显示计划。
+dsh-multiuser install --mode local \
+  --app-dir /srv/dsh-multiuser/app \
+  --data-dir /srv/dsh-multiuser/data \
+  --dsh-command /path/to/dsh \
+  --profile-source ./profiles/user-runtime \
+  --dry-run
+
+# 预览版不提供在线 upgrade 命令。生产升级必须先停止服务，
+# 再执行 backup，安装新版本，启动服务并验证 /readyz 与版本。
+sudo systemctl stop dsh-multiuser
+dsh-multiuser backup --db /srv/dsh-multiuser/data/gateway.sqlite --data-root /srv/dsh-multiuser/data/users --to /srv/dsh-multiuser/backups --config-dir /etc/dsh-multiuser
+sudo npx dsh-multiuser@<新应用版本> install --mode systemd --app-dir /srv/dsh-multiuser/app --data-dir /srv/dsh-multiuser/data --dsh-command /path/to/dsh --dsh-args '[]' --profile-source /srv/dsh-multiuser/app/profiles/user-runtime --host 127.0.0.1 --port 18088 --allowed-host <网关域名> --service-user dsh-multiuser
+sudo systemctl enable --now dsh-multiuser
+dsh-multiuser status --db /srv/dsh-multiuser/data/gateway.sqlite --data-root /srv/dsh-multiuser/data/users --profile-source /srv/dsh-multiuser/app/profiles/user-runtime --dsh-command /path/to/dsh --port 18088
+# 卸载默认保留数据；--purge-data 拒绝根目录/用户 home/工作区根目录。
+dsh-multiuser uninstall --app-dir /srv/dsh-multiuser/app --data-dir /srv/dsh-multiuser/data
+
+# 网关状态与启停辅助。
+dsh-multiuser status --db /srv/dsh-multiuser/data/gateway.sqlite --data-root /srv/dsh-multiuser/data/users --profile-source /srv/dsh-multiuser/app/profiles/user-runtime --dsh-command /path/to/dsh --port 18088
+```
+
+`install --mode systemd` 额外生成 systemd unit（输出拷贝到 `/etc/systemd/system/dsh-multiuser.service` 的命令提示，需要 root 执行）。首次安装后用 `init-admin` 创建管理员——它拒绝重复初始化。
 
 ## 认证
 
@@ -147,61 +211,105 @@ pnpm install-profile \
 
 ## 单机部署
 
-建议将以下目录放在同一台受控主机的专用目录中，并限制 Gateway 服务账号权限：
+生产部署（Linux + systemd + HTTPS 反向代理）请按 [docs/open-source-release/03-production-deployment.md](docs/open-source-release/03-production-deployment.md) 逐步执行。目录布局与关键约束：
 
 ```text
-/srv/dsh-multiuser/
-  app/                 # 本项目和依赖
-  data/gateway.sqlite  # 账号、会话、审计和 Runtime 控制状态
-  data/users/<id>/     # 每个 Principal ID 的 DSH_HOME、workspace、logs
+/opt/dsh-multiuser/          # 应用目录（--app-dir，不可变）
+  bin/dsh-multiuser          #   应用入口，install 创建
+  dist/src/                  #   编译后的 Gateway 与 CLI
+/var/lib/dsh-multiuser/      # 数据目录（--data-dir，可变）
+  gateway.sqlite             #   账号、会话、审计和 Runtime 控制状态
+  gateway.env                #   共享模型配置（管理员在控制台保存，0600）
+  users/                     #   --data-root；每个 Principal ID 一个子目录
+    <id>/{dsh-home,workspace,logs}
+    profile-template/        #   共享模板 Profile home（也在 data-root 内）
+    public-agents/ public-mcp.cordis.yml
+/etc/dsh-multiuser/          # 配置目录
+  gateway.env                #   systemd EnvironmentFile（0600）
+  keys/<kid>.pem             #   SSO 公钥，仅服务账号可读
 ```
 
-由 systemd、Supervisor 或同等进程管理器启动 Gateway。仓库提供了 [deploy/dsh-multiuser.service](deploy/dsh-multiuser.service) 和 [deploy/gateway.env.example](deploy/gateway.env.example) 模板；使用前将 `dsh.example.com`、DSH 安装目录和 Node 路径替换为实际值。
+**systemd 单元由 `install --mode systemd` 直接写入 `/etc/systemd/system/`，不要手工拷贝模板**——手抄的副本会随安装器新增参数而悄悄过期。[deploy/dsh-multiuser.service](deploy/dsh-multiuser.service) 只是 `install --mode systemd --dry-run` 输出的样例，供评审使用：
 
-管理员登录后会自动进入 `/admin`，可在"公共模型"中统一保存 `DEEPSEEK_API_KEY` 和可选的 `DEEPSEEK_BASE_URL`。它们写入数据库同目录的 `gateway.env`（权限 `0600`），不会写入 SQLite、审计日志或用户 workspace。Runtime 启动环境会保留公共 DeepSeek 变量，同时过滤其他名称中包含 `KEY`、`PASSWORD`、`SECRET` 或 `TOKEN` 的父环境变量。
+```sh
+sudo dsh-multiuser install --mode systemd \
+  --app-dir /opt/dsh-multiuser --data-dir /var/lib/dsh-multiuser \
+  --profile-source /opt/dsh-multiuser/profiles/user-runtime \
+  --dsh-command <dsh 可执行路径> --dsh-args '[]' \
+  --host 127.0.0.1 --port 18088 --allowed-host <网关域名> \
+  --service-user dsh-multiuser
+sudo systemctl daemon-reload && sudo systemctl enable --now dsh-multiuser
+```
+
+`--allowed-host` 必须是 `ExecStart` 的最后一个参数，SSO 参数加在它之前。`--dsh-command` 指向 npm 发布的 DSH（`npm install --global @deepseek-ai/dsh@<版本>`），**生产不要依赖 Harness 源码 checkout**；`--launcher-cwd` / `--launcher-entry` 只用于从源码直跑的场景。
+
+管理员登录后会自动进入 `/admin`，可在「公共模型」中统一保存 `DEEPSEEK_API_KEY` 和可选的 `DEEPSEEK_BASE_URL`。它们写入**数据库同目录**的 `gateway.env`（权限 `0600`，即 `/var/lib/dsh-multiuser/gateway.env`，与 systemd 的 `/etc/dsh-multiuser/gateway.env` 是两个文件），不会写入 SQLite、审计日志或用户 workspace。`backup` 会自动把它收进备份。Runtime 启动环境会保留公共 DeepSeek 变量，同时过滤其他名称中包含 `KEY`、`PASSWORD`、`SECRET` 或 `TOKEN` 的父环境变量。
 
 - **公共插件**：管理员填写包名或本机路径时，Gateway 在共享模板 Home 中直接运行 `dsh plugin --profile user-runtime add <spec>`；"安装并校验 Profile"运行 `dsh plugin --profile user-runtime install` 和 `dsh --profile user-runtime --dump-config`。用户私有的依赖、Bundle、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 和 `cordis.patch.yml` 会被保留。
-- **公共 MCP**：管理 DSH 官方 `@deepseek-ai/dsh-mcp-client` 的 stdio 与 Streamable HTTP 连接，保存为 `data/users/public-mcp.cordis.yml`（权限 `0600`），管理 API 只返回环境变量名与 HTTP 标头名，不返回值。
-- **公共 Skill**：保存到 `data/users/public-agents/skills/<name>/`，Runtime 通过 `DSH_AGENTS_HOME` 发现；同名时用户私有 Skill 优先。
+- **公共 MCP**：管理 DSH 官方 `@deepseek-ai/dsh-mcp-client` 的 stdio 与 Streamable HTTP 连接，保存为 `<data-root>/public-mcp.cordis.yml`（权限 `0600`），管理 API 只返回环境变量名与 HTTP 标头名，不返回值。
+- **公共 Skill**：保存到 `<data-root>/public-agents/skills/<name>/`，Runtime 通过 `DSH_AGENTS_HOME` 发现；同名时用户私有 Skill 优先。
 
-生产构建建议使用构建后的入口：
+从源码直跑（开发/调试用，**不是生产路径**——生产用上面的 `install --mode systemd`）：
 
 ```sh
 pnpm build
-pnpm --dir /path/to/deepseek-harness build
 pnpm gateway:dist \
-  --db /srv/dsh-multiuser/data/gateway.sqlite \
-  --data-root /srv/dsh-multiuser/data/users \
+  --db /var/lib/dsh-multiuser/gateway.sqlite \
+  --data-root /var/lib/dsh-multiuser/users \
   --dsh-command node \
   --dsh-args '[]' \
   --launcher-cwd /path/to/deepseek-harness \
   --launcher-entry /path/to/deepseek-harness/apps/cli/lib/bin.js \
   --profile user-runtime \
-  --profile-source /srv/dsh-multiuser/app/profiles/user-runtime \
+  --profile-source profiles/user-runtime \
   --host 127.0.0.1 \
   --port 18088 \
   --allowed-host 127.0.0.1:18088
 ```
 
-首次部署后执行：
+首次部署后执行（完整步骤见第 3 章手册）：
 
 ```sh
-sudo useradd --system --home-dir /srv/dsh-multiuser --shell /usr/sbin/nologin dsh-multiuser
-sudo install -d -o dsh-multiuser -g dsh-multiuser -m 700 /srv/dsh-multiuser/data/users /etc/dsh-multiuser
-sudo install -o dsh-multiuser -g dsh-multiuser -m 600 deploy/gateway.env.example /etc/dsh-multiuser/gateway.env
-# 编辑 /etc/dsh-multiuser/gateway.env 填入模型密钥，再执行构建和初始化。
-pnpm dsh-multiuser init-admin --db /srv/dsh-multiuser/data/gateway.sqlite --username admin --display-name Admin
-sudo install -m 644 deploy/dsh-multiuser.service /etc/systemd/system/dsh-multiuser.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now dsh-multiuser
-sudo systemctl status dsh-multiuser
+sudo useradd --system --home-dir /var/lib/dsh-multiuser --shell /usr/sbin/nologin dsh-multiuser
+sudo install -d -o dsh-multiuser -g dsh-multiuser -m 0700 /var/lib/dsh-multiuser /var/lib/dsh-multiuser/users
+sudo install -d -m 0755 /etc/dsh-multiuser /etc/dsh-multiuser/keys
+printf 'correct-horse-battery-staple\n' | dsh-multiuser init-admin \
+  --db /var/lib/dsh-multiuser/gateway.sqlite --username admin --display-name Admin --password-stdin
+# 管理员密码至少 12 个字符，否则 init-admin 报错并非 0 退出。
+# systemd 单元由 install 直接写入 /etc/systemd/system/，不要手工拷贝 deploy/ 里的样例：
+sudo dsh-multiuser install --mode systemd \
+  --app-dir /opt/dsh-multiuser --data-dir /var/lib/dsh-multiuser \
+  --profile-source /opt/dsh-multiuser/profiles/user-runtime \
+  --dsh-command <dsh 可执行路径> --dsh-args '[]' \
+  --host 127.0.0.1 --port 18088 --allowed-host <网关域名> \
+  --service-user dsh-multiuser
+sudo systemctl daemon-reload && sudo systemctl enable --now dsh-multiuser
+dsh-multiuser status --db /var/lib/dsh-multiuser/gateway.sqlite \
+  --data-root /var/lib/dsh-multiuser/users --profile-source /opt/dsh-multiuser/profiles/user-runtime \
+  --dsh-command <dsh 可执行路径> --dsh-args '[]' \
+  --host 127.0.0.1 --port 18088 --host-header <网关域名>
 ```
 
 生产外部 TLS 由 Ingress 负责，公钥文件可放在 `/etc/dsh-multiuser/keys/` 并仅授权服务账号读取，**绝不能部署签发私钥**。代理必须将 `/auth/sso` 的请求体限制为 8 KiB，且不得记录 Cookie 或 POST body。
 
-## 备份与回滚
+## 备份与恢复
 
-停止 Gateway 后备份 `data/gateway.sqlite`、SQLite WAL/SHM 文件和 `data/users/`。恢复时必须同时恢复数据库和用户目录，避免账号状态与 Runtime 数据不一致。SSO 升级会把 SQLite Schema 迁移到版本 2；旧版本代码不能打开该数据库，回滚必须恢复同一份版本 1 数据库备份。
+停机后使用内置命令备份与恢复，不要手抄 `cp`：
+
+```sh
+dsh-multiuser backup \
+  --db /var/lib/dsh-multiuser/gateway.sqlite \
+  --data-root /var/lib/dsh-multiuser/users \
+  --to <备份目录> --config-dir /etc/dsh-multiuser
+
+dsh-multiuser restore \
+  --from <备份目录>/<时间戳> \
+  --data-root /var/lib/dsh-multiuser/users \
+  --db /var/lib/dsh-multiuser/gateway.sqlite \
+  --config-dir /etc/dsh-multiuser --force
+```
+
+`backup` 用 `VACUUM INTO` 做一致性快照，并一并收走 `<data-dir>/gateway.env`（共享模型配置）。`restore` 先校验 manifest 的 sha256 与 `PRAGMA quick_check`，任何校验失败都在写盘前中止；`--force` 把旧数据**移**到 `.pre-restore-<stamp>` 而非删除。`--data-root` 必须传 `users/` 这一级，传成上一级会让恢复后的用户数据全部不可见。SSO 升级会把 SQLite Schema 迁移到版本 2；旧版本代码不能打开该数据库，回滚必须同时恢复升级前的数据备份。
 
 ## 贡献
 

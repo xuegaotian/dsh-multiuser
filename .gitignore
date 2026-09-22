@@ -22,3 +22,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# DSH compatibility environments (docs/open-source-release/01-dsh-compatibility.md)
+compat-work/
+compat-work-alpha/
+
+# Local assistant workspace data (work logs, not part of the release)
+.workbuddy/

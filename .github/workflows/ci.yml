@@ -9,11 +9,12 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  # Unit tests without a real DSH installation. Blocking.
+  unit:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: ['22']
+        node-version: ['22.19.0', '24']
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,7 +22,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 11.23.0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -35,8 +36,193 @@ jobs:
       - name: Type check
         run: pnpm typecheck
 
-      - name: Test
+      - name: Unit tests
         run: pnpm test
 
       - name: Build
         run: pnpm build
+
+  # Real DSH runtime integration against the npm `latest` dist-tag. Blocking.
+  # The exact version is resolved from the dist-tag and printed so the log
+  # records what was tested; the version is also asserted by the test itself
+  # when DSH_INTEGRATION_VERSION is set.
+  integration-latest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['22.19.0', '24']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve the npm latest DSH version
+        run: |
+          DSH_LATEST_VERSION="$(npm view @deepseek-ai/dsh dist-tags.latest)"
+          echo "DSH_LATEST_VERSION=$DSH_LATEST_VERSION" >> "$GITHUB_ENV"
+          echo "Resolved npm latest @deepseek-ai/dsh: $DSH_LATEST_VERSION"
+
+      - name: Print toolchain and DSH versions
+        run: |
+          node --version
+          pnpm --version
+          echo "project: $(node -p "require('./package.json').version")"
+          echo "dsh under test: $DSH_LATEST_VERSION"
+
+      - name: Install DSH into an isolated compatibility environment
+        run: |
+          mkdir -p compat-work
+          cd compat-work
+          npm init -y >/dev/null
+          npm install --save-exact "@deepseek-ai/dsh@$DSH_LATEST_VERSION"
+          "$PWD/node_modules/.bin/dsh" --version
+
+      - name: Integration tests against real DSH runtimes
+        run: pnpm test:integration
+        env:
+          DSH_INTEGRATION_BIN: ${{ github.workspace }}/compat-work/node_modules/.bin/dsh
+          DSH_INTEGRATION_VERSION: ${{ env.DSH_LATEST_VERSION }}
+
+  # Forward-looking integration against the npm `alpha` dist-tag. NOT
+  # blocking: a failure here means the alpha introduced an incompatible
+  # change and an issue must track it before the next release.
+  integration-alpha:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['22.19.0', '24']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve the npm alpha DSH version
+        run: |
+          DSH_ALPHA_VERSION="$(npm view @deepseek-ai/dsh dist-tags.alpha)"
+          echo "DSH_ALPHA_VERSION=$DSH_ALPHA_VERSION" >> "$GITHUB_ENV"
+          echo "Resolved npm alpha @deepseek-ai/dsh: $DSH_ALPHA_VERSION"
+
+      - name: Print toolchain and DSH versions
+        run: |
+          node --version
+          pnpm --version
+          echo "project: $(node -p "require('./package.json').version")"
+          echo "dsh under test: $DSH_ALPHA_VERSION"
+
+      - name: Install DSH into an isolated compatibility environment
+        run: |
+          mkdir -p compat-work
+          cd compat-work
+          npm init -y >/dev/null
+          npm install --save-exact "@deepseek-ai/dsh@$DSH_ALPHA_VERSION"
+          "$PWD/node_modules/.bin/dsh" --version
+
+      - name: Integration tests against real DSH runtimes (may fail on alpha)
+        run: pnpm test:integration
+        env:
+          DSH_INTEGRATION_BIN: ${{ github.workspace }}/compat-work/node_modules/.bin/dsh
+          DSH_INTEGRATION_VERSION: ${{ env.DSH_ALPHA_VERSION }}
+        continue-on-error: true
+
+  # Pack the published artifact and verify it installs and runs from an empty
+  # directory, exactly as a consumer would. Blocking.
+  pack-verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['22.19.0', '24']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Pack the release tarball
+        run: |
+          PACK_DIR="$(mktemp -d)"
+          echo "PACK_DIR=$PACK_DIR" >> "$GITHUB_ENV"
+          pnpm pack --pack-destination "$PACK_DIR"
+
+      - name: Verify the tarball contains no sensitive or local files
+        run: |
+          TARBALL="$(ls "$PACK_DIR"/*.tgz)"
+          echo "tarball: $TARBALL"
+          # Forbidden content: env files, databases, logs, keys, TypeScript sources, source maps
+          if tar -tf "$TARBALL" | grep -Ei '\.env$|\.sqlite|\.log$|\.pem$|\.key$|\.DS_Store|\.ts$|\.map$'; then
+            echo "::error::tarball contains forbidden files (see list above)"
+            exit 1
+          fi
+          echo "tarball content check passed"
+
+      - name: Install the tarball into an empty directory and run the CLI
+        run: |
+          mkdir -p "$PACK_DIR/consumer"
+          npm install --prefix "$PACK_DIR/consumer" "$PACK_DIR"/*.tgz
+          "$PACK_DIR/consumer/node_modules/.bin/dsh-multiuser" --help
+          echo "tarball install and --help passed"
+
+      - name: Run doctor from the installed tarball against a real DSH
+        run: |
+          test -n "${PACK_DIR:-}" || { echo "::error::PACK_DIR is missing"; exit 1; }
+          test -d "$PACK_DIR" || { echo "::error::PACK_DIR does not exist: $PACK_DIR"; exit 1; }
+          mkdir -p compat-work
+          cd compat-work
+          npm init -y >/dev/null
+          npm install --save-exact "@deepseek-ai/dsh@0.1.5-rc.1"
+          cd ..
+          DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh"
+          test -x "$DSH_INTEGRATION_BIN" || { echo "::error::DSH_INTEGRATION_BIN is missing or not executable: $DSH_INTEGRATION_BIN"; exit 1; }
+          DSH_INTEGRATION_BIN="$PWD/compat-work/node_modules/.bin/dsh" \
+          DSH_PACK_DIR="$PACK_DIR" \
+          DSH_INTEGRATION_VERSION="0.1.5-rc.1" \
+            pnpm vitest run test/install-pack.integration.test.ts
+
+      - name: Ensure doctor and --help created no data directories
+        run: |
+          if [ -d "$PACK_DIR/consumer/data" ]; then
+            echo "::error::consumer data directory was created by a read-only command"
+            ls -la "$PACK_DIR/consumer/data"
+            exit 1
+          fi
+          echo "read-only verification passed"

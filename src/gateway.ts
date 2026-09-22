@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { request as upstreamRequest } from 'node:http'
+import { accessSync, constants, existsSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
+import { join, resolve } from 'node:path'
 import { URL } from 'node:url'
 import WebSocket, { WebSocketServer } from 'ws'
 import { adminPageHtml } from './admin-page.js'
@@ -18,6 +20,7 @@ import { SsoVerifier } from './sso.js'
 const COOKIE_NAME = 'dsh_multiuser_session'
 const ADMIN_COOKIE_NAME = 'dsh_multiuser_admin_session'
 const SSO_FORM_MAX_BYTES = 8 * 1024
+const ADMIN_LOGIN_MAX_BYTES = 8 * 1024
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024
 
 const ADMIN_RPC_ALLOWLIST = new Set(['session/list', 'session/search', 'session/history', 'subagent/list', 'subagent/history'])
@@ -52,6 +55,12 @@ export function adminSessionRpc(method: string, body: Record<string, unknown>): 
   }
 }
 
+/** A single readiness check result with a stable machine-readable code. */
+export interface ReadinessCheck { code: string; ok: boolean; detail: string }
+
+/** Aggregate readiness report returned by the injected readiness probe. */
+export interface ReadinessReport { ok: boolean; checks: ReadinessCheck[] }
+
 export interface GatewayOptions {
   auth: AuthStore
   runtimes: RuntimeManager
@@ -67,6 +76,10 @@ export interface GatewayOptions {
   publicMcp?: PublicMcpStore
   profileManager?: PublicProfile
   sso?: SsoVerifier
+  /** Non-sensitive readiness probe; when absent, /readyz reports unavailable. */
+  readiness?: () => Promise<ReadinessReport>
+  /** Non-sensitive build identity returned by /version. */
+  versionInfo?: { name: string; version: string; commit: string | null; dsh: { tested: string[]; canary: string[] } }
 }
 
 interface SessionContext {
@@ -123,6 +136,7 @@ export class Gateway {
   private readonly options: Required<Pick<GatewayOptions, 'host' | 'port' | 'secureCookies' | 'maxBodyBytes'>> & GatewayOptions
   private listenedPort = 0
   private readonly runtimeAuth = new Map<string, RuntimeAuthState>()
+  private draining = false
 
   constructor(options: GatewayOptions) {
     this.options = {
@@ -149,8 +163,14 @@ export class Gateway {
     return this.listenedPort
   }
 
+  /** Mark the gateway as draining so /healthz stops reporting healthy. */
+  beginShutdown(): void {
+    this.draining = true
+  }
+
   /** Close the gateway and all currently proxied WebSocket connections. */
   async close(): Promise<void> {
+    this.beginShutdown()
     for (const client of this.webSockets.clients) client.close(1001, 'gateway stopping')
     this.webSockets.close()
     if (!this.server.listening) return
@@ -165,6 +185,12 @@ export class Gateway {
     try {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
       if (!this.hasTrustedHost(req)) { writeError(res, 421, 'untrusted host'); return }
+      // Health/readiness/version endpoints are served before any session or
+      // authentication check: they need no cookie, never proxy to a user
+      // runtime, and never write audit logs. Untrusted Hosts still get 421.
+      if (req.method === 'GET' && url.pathname === '/healthz') { this.serveHealthz(res); return }
+      if (req.method === 'GET' && url.pathname === '/readyz') { await this.serveReadyz(res, id); return }
+      if (req.method === 'GET' && url.pathname === '/version') { this.serveVersion(res); return }
       if (url.pathname === '/auth/sso' && req.method === 'POST') { await this.ssoLogin(req, res, id); return }
       if (!this.isTrustedRequest(req)) { writeError(res, 403, 'untrusted origin'); return }
       if (url.pathname === '/auth/logout' && req.method === 'POST') { await this.logout(req, res, id); return }
@@ -231,7 +257,12 @@ export class Gateway {
   }
 
   private async adminLogin(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
-    const body = await readJson(req, this.options.maxBodyBytes)
+    let body: Record<string, unknown>
+    try { body = await readJson(req, ADMIN_LOGIN_MAX_BYTES) } catch (error) {
+      const status = error instanceof Error && error.message === 'request body too large' ? 413 : 400
+      writeError(res, status, status === 413 ? 'request body too large' : 'invalid login request')
+      return
+    }
     if (typeof body !== 'object' || body === null || typeof body.username !== 'string' || typeof body.password !== 'string') { writeError(res, 400, 'username and password are required'); return }
     const result = await this.options.auth.authenticateAdmin(body.username, body.password, { requestId: id, ip: clientIp(req) })
     if (result === undefined) { writeError(res, 401, 'invalid credentials'); return }
@@ -558,6 +589,50 @@ export class Gateway {
     try { return this.options.allowedHosts.includes(new URL(origin).host) } catch { return false }
   }
 
+  private serveHealthz(res: ServerResponse): void {
+    if (this.draining) { json(res, 503, { status: 'draining' }); return }
+    json(res, 200, { status: 'ok' })
+  }
+
+  private async serveReadyz(res: ServerResponse, id: string): Promise<void> {
+    const readiness = this.options.readiness
+    if (readiness === undefined) {
+      json(res, 503, { status: 'not-ready', checks: [{ code: 'READINESS_UNAVAILABLE', ok: false, detail: 'readiness probe is not configured' }] })
+      return
+    }
+    const shaped = await this.shapeReadiness(readiness, id)
+    if (shaped === undefined) {
+      json(res, 503, { status: 'not-ready', checks: [{ code: 'READINESS_PROBE_FAILED', ok: false, detail: 'readiness probe failed' }] })
+      return
+    }
+    json(res, shaped.ok ? 200 : 503, { status: shaped.ok ? 'ready' : 'not-ready', checks: shaped.checks })
+  }
+
+  /**
+   * Shape a readiness report for anonymous consumption. Returns `undefined` for
+   * every failure mode — a probe that throws, a probe that rejects, and a probe
+   * that resolves with a malformed report. Shaping stays inside the guard because
+   * an exception escaping here would reach the top-level handler, which echoes the
+   * raw `error.message` to an unauthenticated caller.
+   */
+  private async shapeReadiness(readiness: () => Promise<ReadinessReport>, id: string): Promise<{ ok: boolean; checks: Array<{ code: string; ok: boolean; detail: string }> } | undefined> {
+    try {
+      const report = await readiness()
+      return { ok: report.ok === true, checks: report.checks.map(check => ({ code: check.code, ok: check.ok, detail: publicReadinessDetail(check.code, check.ok) })) }
+    } catch (error) {
+      console.error('readiness probe failed', { requestId: id, error })
+      return undefined
+    }
+  }
+
+  private serveVersion(res: ServerResponse): void {
+    const info = this.options.versionInfo
+    const body = info === undefined
+      ? { name: 'dsh-multiuser', version: 'unknown', commit: null, dsh: { tested: [], canary: [] }, node: process.version }
+      : { name: info.name, version: info.version, commit: info.commit, dsh: { tested: info.dsh.tested, canary: info.dsh.canary }, node: process.version }
+    json(res, 200, body)
+  }
+
   private adminPage(res: ServerResponse): void {
     const html = adminPageHtml()
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
@@ -572,6 +647,18 @@ export class Gateway {
   private redirectToAdminLogin(res: ServerResponse): void {
     res.writeHead(302, { location: '/admin/login', 'cache-control': 'no-store' })
     res.end()
+  }
+}
+
+function publicReadinessDetail(code: string, ok: boolean): string {
+  switch (code) {
+    case 'DB': return ok ? 'database is ready' : 'database is unavailable'
+    case 'PROFILE_TEMPLATE': return ok ? 'profile template is ready' : 'profile template is unavailable'
+    case 'PROFILE_TEMPLATE_MISSING': return 'profile template is unavailable'
+    case 'DSH_VERSION': return 'dsh version is supported'
+    case 'DSH_VERSION_UNSUPPORTED': return 'dsh version is unsupported'
+    case 'READINESS_UNAVAILABLE': return 'readiness probe is not configured'
+    default: return ok ? 'readiness check passed' : 'readiness check failed'
   }
 }
 
@@ -605,4 +692,75 @@ async function readJson(req: IncomingMessage, maxBytes: number): Promise<Record<
   const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('JSON object required')
   return value as Record<string, unknown>
+}
+
+export interface ReadinessProbeOptions {
+  /** Absolute or relative SQLite database path. */
+  db: string
+  /** Per-user data root (profile template lives under <dataRoot>/profile-template). */
+  dataRoot: string
+  /** DSH profile name whose template package.json is verified. */
+  profile: string
+  /** Tested DSH versions from compatibility.json. */
+  testedDshVersions: readonly string[]
+  /** Injected DSH version resolver; must not be called on every probe (cached). */
+  runDshVersion: () => Promise<string | undefined>
+  /** Injectable clock (ms) for cache TTL; defaults to Date.now. */
+  clock?: () => number
+  /** Cache lifetime in ms; defaults to 60s. */
+  cacheMs?: number
+}
+
+/**
+ * Build a readiness probe with a fixed 60s cache so each Kubernetes probe does
+ * not re-spawn the DSH process. The probe never starts a user runtime nor talks
+ * to a model provider. Check order is fixed: DB, PROFILE_TEMPLATE, DSH_VERSION.
+ */
+export function createReadinessProbe(options: ReadinessProbeOptions): () => Promise<ReadinessReport> {
+  const cacheMs = options.cacheMs ?? 60_000
+  const clock = options.clock ?? (() => Date.now())
+  let cachedAt = -Infinity
+  let cached: ReadinessReport | undefined
+  return async (): Promise<ReadinessReport> => {
+    if (cached !== undefined && clock() - cachedAt < cacheMs) return cached
+    const checks = await Promise.all([
+      dbCheck(resolve(options.db)),
+      profileTemplateCheck(resolve(options.dataRoot), options.profile),
+      dshVersionCheck(options.testedDshVersions, options.runDshVersion),
+    ])
+    const report: ReadinessReport = { ok: checks.every(check => check.ok), checks }
+    cached = report
+    cachedAt = clock()
+    return report
+  }
+}
+
+async function dbCheck(dbPath: string): Promise<ReadinessCheck> {
+  if (!existsSync(dbPath)) return { code: 'DB', ok: false, detail: `database file does not exist: ${dbPath}` }
+  try {
+    accessSync(dbPath, constants.R_OK | constants.W_OK)
+    const store = new AuthStore(dbPath)
+    try { store.listUsers() } finally { store.close() }
+    return { code: 'DB', ok: true, detail: `database is readable and writable: ${dbPath}` }
+  } catch (error) {
+    return { code: 'DB', ok: false, detail: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function profileTemplateCheck(dataRoot: string, profile: string): ReadinessCheck {
+  const manifest = join(dataRoot, 'profile-template', 'profiles', profile, 'package.json')
+  return existsSync(manifest)
+    ? { code: 'PROFILE_TEMPLATE', ok: true, detail: `profile template is present: ${manifest}` }
+    : { code: 'PROFILE_TEMPLATE_MISSING', ok: false, detail: `profile template is missing: ${manifest}` }
+}
+
+async function dshVersionCheck(testedDshVersions: readonly string[], runDshVersion: () => Promise<string | undefined>): Promise<ReadinessCheck> {
+  const version = await runDshVersion()
+  if (version === undefined) {
+    return { code: 'DSH_VERSION_UNSUPPORTED', ok: false, detail: 'could not determine the DSH version' }
+  }
+  if (testedDshVersions.includes(version)) {
+    return { code: 'DSH_VERSION', ok: true, detail: `dsh ${version} is a tested version` }
+  }
+  return { code: 'DSH_VERSION_UNSUPPORTED', ok: false, detail: `dsh ${version} is not a tested version (tested: ${testedDshVersions.join(', ')})` }
 }

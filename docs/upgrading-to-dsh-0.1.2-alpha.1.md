@@ -1,5 +1,7 @@
 # dsh-multiuser 适配 DeepSeek Harness 0.1.2-alpha.1
 
+> **历史资料，不是当前支持流程。** 本文记录 DSH `0.1.2-alpha.1` 的适配过程；当前支持版本、验证方式和生产升级步骤分别以 [DSH 兼容升级](open-source-release/01-dsh-compatibility.md) 和 [生产部署](open-source-release/03-production-deployment.md) 为准。本文命令不可直接用于当前版本升级。
+
 ## 1. 基线和结论
 
 本文档对应 DeepSeek Harness 提交 `cd5ef8148158c3a752a658978873241fdf8e2bbc`，版本为 `0.1.2-alpha.1`。

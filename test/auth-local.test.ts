@@ -94,6 +94,129 @@ describe('AuthStore', () => {
     expect(auth.listAudit().at(-1)).toMatchObject({ action: 'login.failure', detail: 'rate-limited' })
   })
 
+  it('reserves failure capacity across concurrent user logins', async () => {
+    const auth = await store()
+    await auth.createUser({ username: 'alice', displayName: 'Alice', password: 'a long enough password', role: 'user' })
+    const results = await Promise.all(Array.from({ length: 7 }, () => auth.authenticate('alice', 'wrong password', { ip: '192.0.2.20' })))
+
+    expect(results).toHaveLength(7)
+    expect(auth.listAudit().filter(entry => entry.action === 'login.failure' && entry.detail === 'invalid-credentials')).toHaveLength(5)
+    expect(auth.listAudit().filter(entry => entry.action === 'login.failure' && entry.detail === 'rate-limited')).toHaveLength(2)
+  })
+
+  it('reserves failure capacity across concurrent administrator logins', async () => {
+    const auth = await store()
+    await auth.createUser({ username: 'admin', displayName: 'Admin', password: 'a long enough password', role: 'admin' })
+    await Promise.all(Array.from({ length: 7 }, () => auth.authenticateAdmin('admin', 'wrong password', { ip: '192.0.2.21' })))
+
+    expect(auth.listAudit().filter(entry => entry.action === 'admin.login.failure' && entry.detail === 'invalid-credentials')).toHaveLength(5)
+    expect(auth.listAudit().filter(entry => entry.action === 'admin.login.failure' && entry.detail === 'rate-limited')).toHaveLength(2)
+  })
+
+  it('bounds failure windows and removes expired entries', async () => {
+    let now = 1_700_000_000_000
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-multiuser-auth-'))
+    dirs.push(dir)
+    const auth = new AuthStore(join(dir, 'gateway.sqlite'), { now: () => now })
+    stores.push(auth)
+
+    await auth.authenticate('expired-user', 'wrong password', { ip: '192.0.2.10' })
+    now += 15 * 60 * 1000
+    await auth.authenticate('fresh-user', 'wrong password', { ip: '192.0.2.10' })
+    const failures = (auth as unknown as { failures: Map<string, unknown> }).failures
+    expect(failures.has('192.0.2.10:expired-user')).toBe(false)
+
+    for (let index = 0; index < 4_200; index += 1) {
+      await auth.authenticate(`unknown-${String(index).padStart(4, '0')}`, 'wrong password', { ip: '192.0.2.10' })
+    }
+    expect(failures.size).toBeLessThanOrEqual(4_096)
+    const overflowFailures = (auth as unknown as { overflowFailures: Map<string, { count: number }> }).overflowFailures
+    expect(overflowFailures.get('192.0.2.10')?.count).toBeGreaterThanOrEqual(5)
+    expect(await auth.authenticate('untracked-admin', 'correct horse battery staple', { ip: '192.0.2.10' })).toBeUndefined()
+    expect(auth.listAudit().at(-1)).toMatchObject({ action: 'login.failure', detail: 'rate-limited' })
+  })
+
+  it('keeps the fallback budget per client when the account map is full', async () => {
+    const now = 1_700_000_000_000
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-multiuser-auth-'))
+    dirs.push(dir)
+    const auth = new AuthStore(join(dir, 'gateway.sqlite'), { now: () => now })
+    stores.push(auth)
+    const internal = auth as unknown as {
+      failures: Map<string, { count: number; pending: number; startedAt: number }>
+      overflowFailures: Map<string, { count: number }>
+    }
+    for (let index = 0; index < 4_096; index += 1) internal.failures.set(`203.0.113.7:filler-${String(index)}`, { count: 1, pending: 0, startedAt: now })
+    await auth.createUser({ username: 'realuser', displayName: 'Real User', password: 'a long enough password', role: 'user' })
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await auth.authenticate(`fresh-${String(attempt)}`, 'wrong password', { ip: '203.0.113.7' })
+    }
+    expect(internal.overflowFailures.get('203.0.113.7')?.count).toBe(5)
+    await auth.authenticate('another-fresh-name', 'wrong password', { ip: '203.0.113.7' })
+    expect(auth.listAudit().at(-1)).toMatchObject({ action: 'login.failure', detail: 'rate-limited' })
+
+    // An unrelated client must still be able to sign in while the flooding client is blocked.
+    expect(await auth.authenticate('realuser', 'a long enough password', { ip: '198.51.100.77' })).toBeDefined()
+  })
+
+  it('does not refresh the shared fallback budget on a successful login', async () => {
+    const now = 1_700_000_000_000
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-multiuser-auth-'))
+    dirs.push(dir)
+    const auth = new AuthStore(join(dir, 'gateway.sqlite'), { now: () => now })
+    stores.push(auth)
+    const internal = auth as unknown as {
+      failures: Map<string, { count: number; pending: number; startedAt: number }>
+      overflowFailures: Map<string, { count: number }>
+    }
+    for (let index = 0; index < 4_096; index += 1) internal.failures.set(`203.0.113.8:filler-${String(index)}`, { count: 1, pending: 0, startedAt: now })
+    await auth.createUser({ username: 'realuser', displayName: 'Real User', password: 'a long enough password', role: 'user' })
+    const request = { ip: '203.0.113.8' }
+
+    for (let attempt = 0; attempt < 4; attempt += 1) await auth.authenticate(`fresh-${String(attempt)}`, 'wrong password', request)
+    expect(internal.overflowFailures.get('203.0.113.8')?.count).toBe(4)
+
+    // A valid credential must not buy fresh guesses for other accounts while the
+    // shared fallback budget is in force.
+    expect(await auth.authenticate('realuser', 'a long enough password', request)).toBeDefined()
+    expect(internal.overflowFailures.get('203.0.113.8')?.count).toBe(4)
+
+    await auth.authenticate('fifth-fresh-name', 'wrong password', request)
+    expect(internal.overflowFailures.get('203.0.113.8')?.count).toBe(5)
+    await auth.authenticate('sixth-fresh-name', 'wrong password', request)
+    expect(auth.listAudit().at(-1)).toMatchObject({ action: 'login.failure', detail: 'rate-limited' })
+  })
+
+  it('resets the per-account window on a successful login', async () => {
+    const auth = await store()
+    await auth.createUser({ username: 'alice', displayName: 'Alice', password: 'a long enough password', role: 'user' })
+    const request = { ip: '192.0.2.40' }
+    for (let attempt = 0; attempt < 3; attempt += 1) await auth.authenticate('alice', 'wrong password', request)
+    expect(await auth.authenticate('alice', 'a long enough password', request)).toBeDefined()
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect(await auth.authenticate('alice', 'wrong password', request)).toBeUndefined()
+    }
+    expect(auth.listAudit().filter(entry => entry.action === 'login.failure' && entry.detail === 'invalid-credentials')).toHaveLength(8)
+    expect(auth.listAudit().filter(entry => entry.action === 'login.failure' && entry.detail === 'rate-limited')).toHaveLength(0)
+  })
+
+  it('releases reserved capacity when authentication fails unexpectedly', async () => {
+    const auth = await store()
+    await auth.createUser({ username: 'alice', displayName: 'Alice', password: 'a long enough password', role: 'user' })
+    const internal = auth as unknown as {
+      failures: Map<string, { count: number; pending: number; startedAt: number }>
+      db: { prepare: unknown }
+    }
+    const original = internal.db.prepare
+    internal.db.prepare = () => { throw new Error('simulated storage failure') }
+    await expect(auth.authenticate('alice', 'wrong password', { ip: '192.0.2.30' })).rejects.toThrow('simulated storage failure')
+    internal.db.prepare = original
+
+    expect(internal.failures.get('192.0.2.30:alice')?.pending).toBe(0)
+    expect(await auth.authenticate('alice', 'a long enough password', { ip: '192.0.2.30' })).toBeDefined()
+  })
+
   it('resets a password and revokes sessions issued under the old password', async () => {
     const auth = await store()
     const user = await auth.createUser({ username: 'alice', displayName: 'Alice', password: 'old password long', role: 'user' })

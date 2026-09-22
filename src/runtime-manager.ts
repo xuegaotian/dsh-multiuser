@@ -138,7 +138,14 @@ export interface RuntimeManagerOptions {
   idleMs: number
   now?: () => number
   processProvider: RuntimeProcessProvider
-  healthCheck: (spec: RuntimeLaunchSpec) => Promise<boolean>
+  /**
+   * Resolve once the spawned runtime serves its loopback port.
+   *
+   * `isAlive` reports whether the process this start owns is still the tracked
+   * one, so a runtime that crashed on boot fails fast instead of burning the
+   * whole probe budget.
+   */
+  healthCheck: (spec: RuntimeLaunchSpec, isAlive?: () => boolean) => Promise<boolean>
   portAllocator: () => Promise<number>
   environment?: Record<string, string>
   runtimeEnvironment?: () => Promise<Record<string, string>>
@@ -299,7 +306,7 @@ export class RuntimeManager {
         this.persist(entry)
       })
       if (entry.process !== process) throw new Error('runtime exited during health check')
-      if (!await this.options.healthCheck(spec)) throw new Error('health check failed')
+      if (!await this.options.healthCheck(spec, () => entry.process === process)) throw new Error('health check failed')
       if (entry.process !== process) throw new Error('runtime exited during health check')
       entry.record = { ...entry.record, status: 'RUNNING', startedAt: this.now(), lastActiveAt: this.now() }
       this.persist(entry)

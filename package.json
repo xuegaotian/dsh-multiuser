@@ -4,7 +4,29 @@
   "description": "Multi-user gateway and per-user runtime isolation for DeepSeek Harness",
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=22.19.0" },
+  "packageManager": "pnpm@11.23.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "bin": {
+    "dsh-multiuser": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src/**/*.js",
+    "packages/bundle/user-runtime/package.json",
+    "packages/bundle/user-runtime/cordis.patch.yml",
+    "profiles/user-runtime/package.json",
+    "profiles/user-runtime/pnpm-workspace.yaml",
+    "profiles/user-runtime/cordis.patch.yml",
+    "profiles/user-runtime/README.md",
+    "deploy/**",
+    "compatibility.json",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -15,16 +37,21 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/<owner>/dsh-multiuser.git"
+    "url": "https://github.com/xuegaotian/dsh-multiuser.git"
   },
   "bugs": {
-    "url": "https://github.com/<owner>/dsh-multiuser/issues"
+    "url": "https://github.com/xuegaotian/dsh-multiuser/issues"
   },
-  "homepage": "https://github.com/<owner>/dsh-multiuser#readme",
+  "homepage": "https://github.com/xuegaotian/dsh-multiuser#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "vitest run",
+    "test:integration": "vitest run test/harness-latest.integration.test.ts test/gateway-runtime.integration.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
+    "prepublishOnly": "pnpm build",
     "dsh-multiuser": "tsx src/cli.ts",
     "gateway": "tsx src/gateway-cli.ts",
     "install-profile": "tsx src/cli.ts install-profile",

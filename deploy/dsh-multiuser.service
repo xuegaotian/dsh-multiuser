@@ -1,3 +1,25 @@
+# Example systemd unit for dsh-multiuser. GENERATED — do not hand-edit.
+#
+# The authoritative way to install this unit is:
+#
+#   sudo dsh-multiuser install --mode systemd \
+#     --app-dir /opt/dsh-multiuser --data-dir /var/lib/dsh-multiuser \
+#     --profile-source /opt/dsh-multiuser/profiles/user-runtime \
+#     --dsh-command <dsh 可执行路径> --dsh-args '[]' \
+#     --host 127.0.0.1 --port 18088 --allowed-host <网关域名> \
+#     --service-user dsh-multiuser
+#
+# which writes /etc/systemd/system/dsh-multiuser.service directly. This file is
+# only a reviewed sample of that output (and the thing `--system-root` stages);
+# copying it by hand is NOT the supported path, because any flag added to the
+# installer later would silently be missing from a hand-maintained copy.
+#
+# Regenerate with `install --mode systemd --dry-run`, which prints the unit.
+#
+# Layout (see docs/open-source-release/03-production-deployment.md):
+#   app   /opt/dsh-multiuser          npm-published DSH; no Harness source checkout
+#   data  /var/lib/dsh-multiuser      gateway.sqlite + users/ (the --data-root)
+#   conf  /etc/dsh-multiuser          gateway.env + keys/
 [Unit]
 Description=DSH Multi-user Gateway
 After=network.target
@@ -6,26 +28,25 @@ After=network.target
 Type=simple
 User=dsh-multiuser
 Group=dsh-multiuser
-WorkingDirectory=/srv/dsh-multiuser/app
+WorkingDirectory=/opt/dsh-multiuser
 EnvironmentFile=/etc/dsh-multiuser/gateway.env
-ExecStart=/usr/bin/node /srv/dsh-multiuser/app/dist/src/gateway-cli.js \
-  --db /srv/dsh-multiuser/data/gateway.sqlite \
-  --data-root /srv/dsh-multiuser/data/users \
-  --dsh-command /usr/bin/node \
+ExecStart=/usr/bin/node /opt/dsh-multiuser/dist/src/gateway-cli.js \
+  --db /var/lib/dsh-multiuser/gateway.sqlite \
+  --data-root /var/lib/dsh-multiuser/users \
+  --dsh-command /usr/local/bin/dsh \
   --dsh-args '[]' \
-  --launcher-cwd /srv/deepseek-harness \
-  --launcher-entry /srv/deepseek-harness/apps/cli/lib/bin.js \
   --profile user-runtime \
-  --profile-source /srv/dsh-multiuser/app/profiles/user-runtime \
+  --profile-source /opt/dsh-multiuser/profiles/user-runtime \
   --host 127.0.0.1 \
   --port 18088 \
   --allowed-host dsh.example.com
-# Optional SSO sign-in (Ed25519 JWT). Uncomment and fill in your IdP values:
-#  --sso-public-key sso-2026-01=/etc/dsh-multiuser/keys/sso-2026-01.pem \
-#  --sso-issuer example-idp \
-#  --sso-audience dsh-multiuser \
-#  --sso-origin https://sso.example.internal \
-#  --sso-session-minutes 60
+# Optional SSO sign-in (Ed25519 JWT). Uncomment and fill in your IdP values.
+# --allowed-host must stay the LAST argument of ExecStart, so add the SSO flags
+# directly above it rather than after it.
+#  --sso-public-key <kid>=/etc/dsh-multiuser/keys/<kid>.pem \
+#  --sso-issuer <IdP issuer> \
+#  --sso-audience <IdP audience> \
+#  --sso-origin https://<IdP origin>
 Restart=on-failure
 RestartSec=5s
 UMask=0077

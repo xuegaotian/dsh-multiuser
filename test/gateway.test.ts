@@ -286,6 +286,26 @@ describe('gateway policy', () => {
     expect(auth.listAudit()).toContainEqual(expect.objectContaining({ action: 'admin.runtime.stop', result: 'failure' }))
   })
 
+  it('keeps administrator login working with normal credentials', async () => {
+    const { base } = await gatewayFixture('admin')
+    const response = await fetch(`${base}/admin/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'correct horse battery staple' }),
+    })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('set-cookie')).toContain('dsh_multiuser_admin_session=')
+  })
+
+  it('rejects an oversized administrator login body with 413', async () => {
+    const { base } = await gatewayFixture('admin')
+    const response = await fetch(`${base}/admin/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'x'.repeat(8 * 1024) }),
+    })
+    expect(response.status).toBe(413)
+    expect(await response.json()).toEqual({ error: 'request body too large' })
+  })
+
   it('uses the shared Profile manager for administrator plugin operations', async () => {
     const calls: string[] = []
     const profileManager: PublicProfile = {

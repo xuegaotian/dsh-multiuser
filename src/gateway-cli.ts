@@ -1,4 +1,5 @@
 import { createServer } from 'node:net'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -6,7 +7,7 @@ import { Command } from 'commander'
 import { join, resolve } from 'node:path'
 import { dirname } from 'node:path'
 import { AuthStore } from './auth-local.js'
-import { Gateway } from './gateway.js'
+import { Gateway, createReadinessProbe } from './gateway.js'
 import { LocalRuntimeProcessProvider, RuntimeManager } from './runtime-manager.js'
 import { prepareProfileTemplate, prepareUserProfile } from './user-profile.js'
 import { GlobalConfigStore } from './global-config.js'
@@ -15,6 +16,7 @@ import { PublicMcpStore } from './public-mcp.js'
 import { PublicProfileManager } from './public-profile.js'
 import { importSPKI } from 'jose'
 import { SsoVerifier } from './sso.js'
+import { packageRoot, readCompatibility } from './install.js'
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -26,6 +28,41 @@ function freePort(): Promise<number> {
     })
   })
 }
+
+/** Resolve the DSH launcher version without importing the private installer helper. */
+function runDshVersionCommand(command: string, args: readonly string[], cwd?: string): Promise<string | undefined> {
+  return new Promise<string | undefined>(resolvePromise => {
+    const child = spawn(command, [...args, '--version'], { cwd: cwd ?? process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' })
+    let output = ''
+    child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString('utf8') })
+    child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString('utf8') })
+    child.once('error', () => resolvePromise(undefined))
+    child.once('close', () => {
+      const match = /\d+\.\d+\.\d+[-a-zA-Z0-9.]*/u.exec(output.trim())
+      resolvePromise(match === null ? undefined : match[0])
+    })
+  })
+}
+
+async function readPackageVersion(): Promise<string> {
+  try {
+    const pkg = JSON.parse(await readFile(join(packageRoot(), 'package.json'), 'utf8')) as { version?: string }
+    if (typeof pkg.version === 'string') return pkg.version
+  } catch { /* fall through to the unknown fallback */ }
+  return 'unknown'
+}
+
+/**
+ * How long a user runtime may take to serve its loopback port before the
+ * Gateway gives up on the request that triggered the start.
+ *
+ * A cold start has to install/refresh the per-user Profile and boot the whole
+ * DSH web profile, so the budget has to absorb a loaded host. The previous 5s
+ * ceiling (50 attempts) turned a slow boot into an HTTP 500 for the first
+ * request of a session, and it also failed under parallel integration runs.
+ */
+const RUNTIME_HEALTH_CHECK_INTERVAL_MS = 100
+const RUNTIME_HEALTH_CHECK_ATTEMPTS = 300
 
 const program = new Command()
   .name('dsh-multiuser gateway')
@@ -122,20 +159,32 @@ try {
     publicAgentsHome: resolve(options.dataRoot, 'public-agents'),
     ...(launcherEntry === undefined ? {} : { environment: { DSH_LAUNCHER_ENTRY: launcherEntry, SSH_CONNECTION: 'dsh-multiuser-embedded-browser' } }),
     portAllocator: freePort,
-    healthCheck: async spec => {
-      for (let attempt = 0; attempt < 50; attempt += 1) {
+    healthCheck: async (spec, isAlive) => {
+      for (let attempt = 0; attempt < RUNTIME_HEALTH_CHECK_ATTEMPTS; attempt += 1) {
+        // A runtime that already exited can never answer; fail fast instead of
+        // holding the caller (and the first proxied request) for the full budget.
+        if (isAlive?.() === false) return false
         try {
           const response = await fetch(`http://127.0.0.1:${String(spec.port)}/`)
           // The current Runtime protects `/` before its browser token exchange;
           // a 401 proves the loopback server is ready to authenticate.
           if (response.ok || response.status === 401) return true
         } catch { /* startup still in progress */ }
-        await new Promise(resolve => setTimeout(resolve, 100))
+        if (attempt + 1 < RUNTIME_HEALTH_CHECK_ATTEMPTS) {
+          await new Promise(resolve => setTimeout(resolve, RUNTIME_HEALTH_CHECK_INTERVAL_MS))
+        }
       }
       return false
     },
   })
   const gatewayPort = Number(options.port) === 0 ? await freePort() : Number(options.port)
+  const compatibility = await readCompatibility()
+  const versionInfo = {
+    name: 'dsh-multiuser',
+    version: await readPackageVersion(),
+    commit: process.env.DSH_MULTIUSER_COMMIT ?? null,
+    dsh: { tested: compatibility.testedDshVersions, canary: compatibility.canaryDshVersions },
+  }
   const gateway = new Gateway({
     auth, runtimes, host: options.host, port: gatewayPort,
     allowedHosts: options.allowedHost ?? [`${options.host}:${String(gatewayPort)}`],
@@ -146,10 +195,24 @@ try {
     publicMcp,
     profileManager,
     ...(sso === undefined ? {} : { sso }),
+    readiness: createReadinessProbe({
+      db: options.db,
+      dataRoot: options.dataRoot,
+      profile: options.profile,
+      testedDshVersions: compatibility.testedDshVersions,
+      runDshVersion: () => runDshVersionCommand(options.dshCommand, dshCliArgs, launcherCwd),
+    }),
+    versionInfo,
   })
   await gateway.start()
   const reapTimer = setInterval(() => { void runtimes.reapIdle() }, 60_000)
-  const stop = async (): Promise<void> => { clearInterval(reapTimer); await gateway.close(); await runtimes.close(); auth.close() }
+  const stop = async (): Promise<void> => {
+    gateway.beginShutdown()
+    clearInterval(reapTimer)
+    await gateway.close()
+    await runtimes.close()
+    auth.close()
+  }
   process.once('SIGTERM', () => { void stop().then(() => process.exit(0)) })
   process.once('SIGINT', () => { void stop().then(() => process.exit(130)) })
   process.stdout.write(`dsh-multiuser gateway: http://${options.host}:${String(gateway.port)}\n`)

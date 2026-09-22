@@ -99,12 +99,23 @@ interface RuntimeRow {
 
 interface FailureWindow {
   count: number
+  pending: number
   startedAt: number
+}
+
+interface LoginAttemptReservation {
+  key: string
+  client: string
+  window: FailureWindow
+  overflow: boolean
+  released: boolean
 }
 
 const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1000
 const DEFAULT_LOGIN_WINDOW_MS = 15 * 60 * 1000
 const DEFAULT_MAX_LOGIN_FAILURES = 5
+const MAX_LOGIN_FAILURE_WINDOWS = 4_096
+const FAILURE_PRUNE_INTERVAL_MS = 60 * 1000
 const DEFAULT_SSO_SESSION_TTL_MS = 60 * 60 * 1000
 const SCHEMA_VERSION = 2
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -152,6 +163,8 @@ export class AuthStore {
   private readonly loginWindowMs: number
   private readonly ssoSessionTtlMs: number
   private readonly failures = new Map<string, FailureWindow>()
+  private readonly overflowFailures = new Map<string, FailureWindow>()
+  private lastFailurePruneAt = Number.NEGATIVE_INFINITY
 
   constructor(path: string, options: AuthStoreOptions = {}) {
     this.db = new DatabaseSync(path)
@@ -274,40 +287,52 @@ export class AuthStore {
   /** Authenticate a password and mint a raw session id for an HttpOnly cookie. */
   async authenticate(usernameInput: string, password: string, request: { requestId?: string; ip?: string } = {}): Promise<LoginResult | undefined> {
     const username = normalizedUsername(usernameInput)
-    const key = `${request.ip ?? 'unknown'}:${username}`
-    if (this.isRateLimited(key)) {
+    const client = request.ip ?? 'unknown'
+    const key = `${client}:${username}`
+    const reservation = this.reserveLoginAttempt(key, client)
+    if (reservation === undefined) {
       this.audit('login.failure', username, 'failure', request, 'rate-limited')
       return undefined
     }
-    const row = this.db.prepare("SELECT id, username, display_name, password_hash, role, enabled, created_at, updated_at, auth_source, external_issuer, external_subject, external_username FROM users WHERE username = ? AND auth_source = 'local'").get(username) as unknown as UserRow | undefined
-    const valid = row !== undefined && row.enabled === 1 && await argon2.verify(row.password_hash, password).catch(() => false)
-    if (!valid) {
-      this.recordFailure(key)
-      this.audit('login.failure', row?.id ?? username, 'failure', request, 'invalid-credentials')
-      return undefined
+    try {
+      const row = this.db.prepare("SELECT id, username, display_name, password_hash, role, enabled, created_at, updated_at, auth_source, external_issuer, external_subject, external_username FROM users WHERE username = ? AND auth_source = 'local'").get(username) as unknown as UserRow | undefined
+      const valid = row !== undefined && row.enabled === 1 && await argon2.verify(row.password_hash, password).catch(() => false)
+      if (!valid) {
+        this.completeFailedLoginAttempt(reservation)
+        this.audit('login.failure', row?.id ?? username, 'failure', request, 'invalid-credentials')
+        return undefined
+      }
+      this.completeSuccessfulLoginAttempt(reservation)
+      const sessionId = randomBytes(32).toString('base64url')
+      const timestamp = this.now()
+      const expiresAt = timestamp + this.sessionTtlMs
+      this.db.prepare("INSERT INTO login_sessions (session_hash, user_id, created_at, expires_at, last_access_at, auth_source) VALUES (?, ?, ?, ?, ?, 'local')")
+        .run(hashSession(sessionId), row.id, timestamp, expiresAt, timestamp)
+      this.audit('login.success', row.id, 'success', request)
+      return { sessionId, expiresAt, user: publicUser(row) }
+    } finally {
+      this.releaseLoginAttempt(reservation)
     }
-    this.failures.delete(key)
-    const sessionId = randomBytes(32).toString('base64url')
-    const timestamp = this.now()
-    const expiresAt = timestamp + this.sessionTtlMs
-    this.db.prepare("INSERT INTO login_sessions (session_hash, user_id, created_at, expires_at, last_access_at, auth_source) VALUES (?, ?, ?, ?, ?, 'local')")
-      .run(hashSession(sessionId), row.id, timestamp, expiresAt, timestamp)
-    this.audit('login.success', row.id, 'success', request)
-    return { sessionId, expiresAt, user: publicUser(row) }
   }
 
   /** Authenticate only an enabled local administrator and mint an administrator session. */
   async authenticateAdmin(usernameInput: string, password: string, request: { requestId?: string; ip?: string } = {}): Promise<LoginResult | undefined> {
     const username = normalizedUsername(usernameInput)
-    const key = `${request.ip ?? 'unknown'}:${username}`
-    if (this.isRateLimited(key)) { this.audit('admin.login.failure', username, 'failure', request, 'rate-limited'); return undefined }
-    const row = this.db.prepare("SELECT id, username, display_name, password_hash, role, enabled, created_at, updated_at, auth_source, external_issuer, external_subject, external_username FROM users WHERE username = ? AND auth_source = 'local' AND role = 'admin' AND enabled = 1").get(username) as unknown as UserRow | undefined
-    const valid = row !== undefined && await argon2.verify(row.password_hash, password).catch(() => false)
-    if (!valid) { this.recordFailure(key); this.audit('admin.login.failure', row?.id ?? username, 'failure', request, 'invalid-credentials'); return undefined }
-    this.failures.delete(key)
-    const result = this.createSession(row.id, 'local')
-    this.audit('admin.login.success', row.id, 'success', request)
-    return { ...result, user: publicUser(row) }
+    const client = request.ip ?? 'unknown'
+    const key = `${client}:${username}`
+    const reservation = this.reserveLoginAttempt(key, client)
+    if (reservation === undefined) { this.audit('admin.login.failure', username, 'failure', request, 'rate-limited'); return undefined }
+    try {
+      const row = this.db.prepare("SELECT id, username, display_name, password_hash, role, enabled, created_at, updated_at, auth_source, external_issuer, external_subject, external_username FROM users WHERE username = ? AND auth_source = 'local' AND role = 'admin' AND enabled = 1").get(username) as unknown as UserRow | undefined
+      const valid = row !== undefined && await argon2.verify(row.password_hash, password).catch(() => false)
+      if (!valid) { this.completeFailedLoginAttempt(reservation); this.audit('admin.login.failure', row?.id ?? username, 'failure', request, 'invalid-credentials'); return undefined }
+      this.completeSuccessfulLoginAttempt(reservation)
+      const result = this.createSession(row.id, 'local')
+      this.audit('admin.login.success', row.id, 'success', request)
+      return { ...result, user: publicUser(row) }
+    } finally {
+      this.releaseLoginAttempt(reservation)
+    }
   }
 
   /** Find or create an SSO user by immutable issuer and subject only. */
@@ -466,21 +491,105 @@ export class AuthStore {
     return normalizedUsername(`${candidate.slice(0, 55)}-${createHash('sha256').update(subject).digest('hex').slice(0, 8)}`)
   }
 
-  private isRateLimited(key: string): boolean {
-    const window = this.failures.get(key)
-    if (window === undefined) return false
-    if (this.now() - window.startedAt >= this.loginWindowMs) {
+  /**
+   * Reserve one password-verification slot before the expensive hash check runs.
+   * The per-account map is bounded, so a flood of distinct usernames cannot grow it
+   * without limit; once it is full the reservation falls back to a per-client bucket
+   * so that exhausting the map only spends the flooding client's own budget.
+   */
+  private reserveLoginAttempt(key: string, client: string): LoginAttemptReservation | undefined {
+    const timestamp = this.now()
+    this.pruneExpiredFailures(timestamp)
+    let window = this.failures.get(key)
+    let overflow = false
+    if (window !== undefined && timestamp - window.startedAt >= this.loginWindowMs) {
       this.failures.delete(key)
-      return false
+      window = undefined
     }
-    return window.count >= this.maxLoginFailures
+    if (window === undefined) {
+      if (this.failures.size < MAX_LOGIN_FAILURE_WINDOWS) {
+        window = { count: 0, pending: 0, startedAt: timestamp }
+        this.failures.set(key, window)
+      } else {
+        overflow = true
+        window = this.overflowFailures.get(client)
+        if (window !== undefined && timestamp - window.startedAt >= this.loginWindowMs) {
+          this.overflowFailures.delete(client)
+          window = undefined
+        }
+        if (window === undefined) {
+          // Fail closed rather than sharing one global bucket: a global bucket would let a
+          // single client lock every unrelated account out of the gateway.
+          if (this.overflowFailures.size >= MAX_LOGIN_FAILURE_WINDOWS) return undefined
+          window = { count: 0, pending: 0, startedAt: timestamp }
+          this.overflowFailures.set(client, window)
+        }
+      }
+    }
+    if (window.count + window.pending >= this.maxLoginFailures) return undefined
+    window.pending += 1
+    return { key, client, window, overflow, released: false }
   }
 
-  private recordFailure(key: string): void {
+  private recordFailure(key: string, client: string): void {
     const timestamp = this.now()
+    this.pruneExpiredFailures(timestamp)
     const window = this.failures.get(key)
     if (window === undefined || timestamp - window.startedAt >= this.loginWindowMs) {
-      this.failures.set(key, { count: 1, startedAt: timestamp })
+      if (window !== undefined) this.failures.delete(key)
+      if (this.failures.size >= MAX_LOGIN_FAILURE_WINDOWS) {
+        const overflow = this.overflowFailures.get(client)
+        if (overflow !== undefined && timestamp - overflow.startedAt < this.loginWindowMs) overflow.count += 1
+        else if (this.overflowFailures.size < MAX_LOGIN_FAILURE_WINDOWS) this.overflowFailures.set(client, { count: 1, pending: 0, startedAt: timestamp })
+        return
+      }
+      this.failures.set(key, { count: 1, pending: 0, startedAt: timestamp })
     } else window.count += 1
+  }
+
+  /** Return a reserved slot exactly once, so no code path can strand window capacity. */
+  private releaseLoginAttempt(reservation: LoginAttemptReservation): void {
+    if (reservation.released) return
+    reservation.released = true
+    if (reservation.window.pending > 0) reservation.window.pending -= 1
+  }
+
+  private completeFailedLoginAttempt(reservation: LoginAttemptReservation): void {
+    const { key, client, window, overflow } = reservation
+    this.releaseLoginAttempt(reservation)
+    const timestamp = this.now()
+    this.pruneExpiredFailures(timestamp)
+    const current = overflow ? this.overflowFailures.get(client) : this.failures.get(key)
+    if (current === window && timestamp - window.startedAt < this.loginWindowMs) window.count += 1
+    else this.recordFailure(key, client)
+  }
+
+  private completeSuccessfulLoginAttempt(reservation: LoginAttemptReservation): void {
+    const { key, client, window, overflow } = reservation
+    this.releaseLoginAttempt(reservation)
+    if (overflow) {
+      // Deliberately asymmetric with the per-account branch below: a successful
+      // login does NOT reset the shared per-client fallback budget. The fallback
+      // bucket only exists while the account map is exhausted, i.e. while someone
+      // is flooding with distinct usernames. Resetting its count on success would
+      // let the holder of any single valid credential keep buying fresh guesses
+      // against every other account. The count still expires with the window.
+      if (this.overflowFailures.get(client) === window && window.count === 0 && window.pending === 0) this.overflowFailures.delete(client)
+      return
+    }
+    if (this.failures.get(key) !== window) return
+    window.count = 0
+    if (window.pending === 0) this.failures.delete(key)
+  }
+
+  private pruneExpiredFailures(timestamp: number): void {
+    if (timestamp >= this.lastFailurePruneAt && timestamp - this.lastFailurePruneAt < FAILURE_PRUNE_INTERVAL_MS) return
+    this.lastFailurePruneAt = timestamp
+    for (const [key, window] of this.failures) {
+      if (timestamp - window.startedAt >= this.loginWindowMs) this.failures.delete(key)
+    }
+    for (const [client, window] of this.overflowFailures) {
+      if (timestamp - window.startedAt >= this.loginWindowMs) this.overflowFailures.delete(client)
+    }
   }
 }

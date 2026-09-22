@@ -7,7 +7,7 @@
 ## Reporting a Vulnerability
 
 **请勿公开披露安全漏洞。** 请通过 GitHub 的
-[Private Vulnerability Reporting](https://github.com/<owner>/dsh-multiuser/security/advisories/new)
+[Private Vulnerability Reporting](https://github.com/xuegaotian/dsh-multiuser/security/advisories/new)
 功能私下报告，或联系仓库维护者。
 
 请在报告中包含：
@@ -28,3 +28,4 @@
 - 不要在生产环境使用 `--insecure-cookies`。
 - 不要将包含 `KEY` / `PASSWORD` / `SECRET` / `TOKEN` 的环境变量暴露给用户 Runtime。
 - 反向代理不得记录 Cookie 或 POST body，`/auth/sso` 请求体上限应为 8 KiB。
+- **登录限速的作用域是「直连对端地址 + 用户名」，且网关不读取 `X-Forwarded-For`。** 把网关放在共享地址的反向代理之后（如同机的 nginx `proxy_pass http://127.0.0.1:<port>`）时，所有客户端会被视为同一个对端，一个未认证客户端就能耗尽限速额度并让**所有**新登录被拒绝最长 15 分钟。在解决这一点之前，请在代理层对登录端点叠加 `limit_req` 之类的限速并限制其可达面。详见 [生产部署](docs/open-source-release/03-production-deployment.md) 的「已知限制」。

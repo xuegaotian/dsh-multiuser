@@ -1,30 +1,30 @@
 ---
-title: dsh-multiuser SSO 集成方案（以运维平台为示例）
-status: proposed
+title: dsh-multiuser SSO 协议与 IdP 接入参考
+status: implemented
 owner: dsh-multiuser
-last_verified: 2026-08-28
+last_verified: 2026-09-17
 ---
 
-# dsh-multiuser SSO 集成方案（以运维平台为示例）
+# dsh-multiuser SSO 协议与 IdP 接入参考
 
 ## Summary
 
-本方案为 `dsh-multiuser` 增加通用 SSO 普通用户登录，同时保留并隔离本地管理员登录。Gateway 接收浏览器 POST 的 60 秒 Ed25519 JWT，验证后按 `issuer + subject` 查找或创建普通用户，再复用现有 Gateway Session、Runtime Manager 和 Harness Runtime Cookie 交换。管理员使用独立路由和独立 Cookie 登录 `/admin`，SSO JWT 永远不能创建或提升管理员。本文描述插件侧待实施的数据库迁移、路由、验证、配置、测试、上线和回滚。本文以某个内部运维平台作为示例 IdP，但其设计对任意签发 Ed25519 JWT 的 IdP 通用。
+本文记录当前 SSO 普通用户登录、独立本地管理员登录、JWT 校验、用户映射、Runtime Cookie 交换和回滚约束。Gateway 接收浏览器 POST 的 60 秒 Ed25519 JWT，验证后按 `issuer + subject` 查找或创建普通用户，再复用现有 Gateway Session、Runtime Manager 和 Harness Runtime Cookie 交换。管理员使用独立路由和独立 Cookie 登录 `/admin`，SSO JWT 永远不能创建或提升管理员。本文以某个内部运维平台作为示例 IdP，但协议适用于任意签发 Ed25519 JWT 的 IdP。
 
 ## Table of Contents
 
-- [目标和边界](#目标和边界)
+- [认证边界](#认证边界)
 - [当前实现依据](#当前实现依据)
 - [固定 JWT 协议](#固定-jwt-协议)
-- [目标认证流程](#目标认证流程)
-- [依赖和文件范围](#依赖和文件范围)
-- [数据库迁移](#数据库迁移)
+- [认证流程](#认证流程)
+- [依赖和实现范围](#依赖和实现范围)
+- [数据库模型](#数据库模型)
 - [SSO 验证服务](#sso-验证服务)
-- [Gateway 路由改造](#gateway-路由改造)
+- [Gateway 路由](#gateway-路由)
 - [管理员入口保留](#管理员入口保留)
 - [CLI 和配置](#cli-和配置)
-- [测试方案](#测试方案)
-- [实施顺序](#实施顺序)
+- [验证覆盖范围](#验证覆盖范围)
+- [维护与发布验证](#维护与发布验证)
 - [验收标准](#验收标准)
 - [上线和回滚](#上线和回滚)
 - [禁止事项](#禁止事项)
@@ -32,7 +32,7 @@ last_verified: 2026-08-28
 
 -----
 
-## 目标和边界
+## 认证边界
 
 Gateway 接受两种认证来源，但每条路由只接受一种明确的会话 Cookie。
 
@@ -42,7 +42,7 @@ Gateway 接受两种认证来源，但每条路由只接受一种明确的会话
 | `GET /admin/login` | Gateway 本地账号 | 仅 `admin` | 显示管理员登录页 |
 | `POST /admin/auth/login` | Gateway 本地 Argon2id 密码 | 仅 `admin` | 设置管理员 Cookie，返回成功 |
 
-目标：
+当前行为：
 
 - 运维平台用户首次登录时即时创建普通 Gateway 用户。
 - 后续登录按 `issuer + subject` 找到同一个 Gateway UUID。
@@ -59,19 +59,19 @@ Gateway 接受两种认证来源，但每条路由只接受一种明确的会话
 
 ## 当前实现依据
 
-实现模型必须保留以下当前机制。
+当前实现包含以下机制。
 
-| 当前机制 | 位置 | 改造要求 |
+| 当前机制 | 位置 | 约束 |
 |---|---|---|
-| 本地账号、Argon2id、登录 Session 和审计 | `src/auth-local.ts` | 增加外部身份方法，不复制 Session 存储 |
-| 普通用户 Cookie `dsh_multiuser_session` | `src/gateway.ts` | 保留为普通用户 Cookie |
-| `/auth/login` 同时允许普通用户和管理员 | `src/gateway.ts` | 收敛为管理员专用入口 |
-| 管理员访问 `/` 自动跳转 `/admin` | `src/gateway.ts` | 改为管理员 Cookie 只控制 `/admin` |
+| 本地账号、Argon2id、登录 Session 和审计 | `src/auth-local.ts` | 外部身份复用同一 Session 存储，不复制认证实现 |
+| 普通用户 Cookie `dsh_multiuser_session` | `src/gateway.ts` | 仅用于普通用户页面、API 和 Remote WebSocket |
+| `/auth/sso` 与 `/admin/auth/login` | `src/gateway.ts` | SSO 只创建普通用户；管理员只使用本地密码入口 |
+| 管理员 Cookie | `src/gateway.ts` | 只控制 `/admin`，不能访问普通 Runtime |
 | Runtime 按内部 `user.id` 路由 | `src/runtime-manager.ts` | 不改为用户名或外部 subject 路由 |
 | Runtime token 换取 `dsh-auth-*` Cookie | `src/gateway.ts` 的 `ensureRuntime()` | SSO 成功后复用，不改变内部握手 |
-| Host/Origin 校验 | `src/gateway.ts` 的 `isTrustedRequest()` | 只给 `/auth/sso` 增加精确允许的运维平台 Origin |
+| Host/Origin 校验 | `src/gateway.ts` 的 `isTrustedRequest()` | `/auth/sso` 使用配置的精确 Origin，其他路由使用 Gateway Origin |
 
-现有工作区包含未提交修改和 `data/`。实现前必须记录 `git status --short`，不得覆盖、清理或回退不属于本次任务的改动。
+认证实现不信任浏览器提交的用户标识；Runtime 始终按 Gateway 内部用户 UUID 路由。
 
 ## 固定 JWT 协议
 
@@ -119,7 +119,7 @@ Gateway 验证要求：
 
 ```http
 POST /auth/sso
-Origin: https://sso.example.internal
+Origin: https://sso.example.com
 Content-Type: application/x-www-form-urlencoded
 
 token=<compact JWT>
@@ -139,7 +139,7 @@ Referrer-Policy: no-referrer
 
 -----
 
-## 目标认证流程
+## 认证流程
 
 ```text
 运维平台页面
@@ -160,25 +160,20 @@ Referrer-Policy: no-referrer
 
 -----
 
-## 依赖和文件范围
+## 依赖和实现范围
 
 ### 依赖
 
-修改 `package.json` 和 `pnpm-lock.yaml`：
+`package.json` 和 `pnpm-lock.yaml` 声明 `jose` 运行时依赖。实现使用 `jose.importSPKI()` 导入 Ed25519 公钥，并使用 `jose.jwtVerify()` 验证 JWT；代码不自行实现 JWT 解析、Base64URL、Ed25519 或 claims 时间校验。
 
-- 增加维护中的 `jose` 运行时依赖。
-- 使用 `jose.importSPKI()` 导入 Ed25519 公钥。
-- 使用 `jose.jwtVerify()` 验证 JWT。
-- 不自行实现 JWT 解析、Base64URL、Ed25519 或 claims 时间校验。
-
-### 新增文件
+### 实现文件
 
 ```text
 src/sso.ts
 test/sso.test.ts
 ```
 
-### 修改文件
+### 相关文件
 
 ```text
 package.json
@@ -196,11 +191,11 @@ deploy/dsh-multiuser.service
 README.md
 ```
 
-`src/runtime-manager.ts` 和 Harness Bundle 原则上不需要为 SSO 修改。只有真实集成测试发现 Runtime 身份归属错误时才修改，并在同一变更中解释原因和补充隔离测试。
+`src/runtime-manager.ts` 和 Harness Bundle 不承担 SSO 身份映射；Runtime 始终使用 Gateway 内部用户 UUID。
 
 -----
 
-## 数据库迁移
+## 数据库模型
 
 数据库迁移必须保留现有本地管理员、普通用户、登录 Session、Runtime 记录、审计和用户目录。
 
@@ -224,7 +219,7 @@ ALTER TABLE users ADD COLUMN external_subject TEXT;
 ALTER TABLE users ADD COLUMN external_username TEXT;
 ```
 
-增加索引：
+当前索引：
 
 ```sql
 CREATE UNIQUE INDEX users_external_identity_idx
@@ -242,7 +237,7 @@ SQLite 的 `users.password_hash` 当前为 `NOT NULL`。版本 2 不重建表；
 
 ### Session 来源
 
-给 `login_sessions` 增加：
+`login_sessions` 包含：
 
 ```sql
 ALTER TABLE login_sessions ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'local'
@@ -253,7 +248,7 @@ ALTER TABLE login_sessions ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'local'
 
 ### 外部用户查找或创建
 
-在 `AuthStore` 新增：
+`AuthStore` 提供：
 
 ```ts
 findOrCreateExternalUser(input: {
@@ -264,7 +259,7 @@ findOrCreateExternalUser(input: {
 }, audit?: AuditContext): Promise<User>
 ```
 
-实现要求：
+行为约束：
 
 1. 使用 `issuer + subject` 查询，绝不按 username 或 display name 认领用户。
 2. 第一次登录在事务中创建内部 UUID、普通用户和不可登录 password hash。
@@ -276,7 +271,7 @@ findOrCreateExternalUser(input: {
 
 ### 现有本地普通用户
 
-迁移把所有现有用户标记为 `auth_source='local'`，不按用户名自动合并。需要保留某个本地用户历史数据时，新增显式 CLI：
+现有本地用户保持 `auth_source='local'`，不会按用户名自动合并。需要保留某个本地用户历史数据时，使用显式 CLI：
 
 ```text
 link-sso-user --db <path> --local-username <name> --issuer <issuer> --subject <uuid> --sso-username <name> --confirm
@@ -288,9 +283,9 @@ link-sso-user --db <path> --local-username <name> --issuer <issuer> --subject <u
 
 ## SSO 验证服务
 
-新增 `src/sso.ts`，集中拥有公钥、协议校验和短期 replay 状态。
+`src/sso.ts` 集中管理公钥、协议校验和短期 replay 状态。
 
-建议接口：
+接口：
 
 ```ts
 export interface OpsIdentity {
@@ -316,7 +311,7 @@ export class SsoVerifier {
 }
 ```
 
-实现要求：
+行为约束：
 
 - 构造时解析所有公钥，密钥文件缺失、`kid` 重复或不是 Ed25519 时 Gateway 启动失败。
 - `verify()` 先读取 protected header 选择已配置 `kid`，然后使用 `jwtVerify()` 固定验证 EdDSA、issuer 和 audience。
@@ -329,7 +324,7 @@ export class SsoVerifier {
 
 -----
 
-## Gateway 路由改造
+## Gateway 路由
 
 ### GatewayOptions
 
@@ -337,7 +332,7 @@ export class SsoVerifier {
 
 ### Host 和 Origin
 
-当前 `isTrustedRequest()` 要求 Origin host 位于 `allowedHosts`，会拒绝运维平台跨站表单。改造时必须保持所有请求先验证 Gateway Host，再仅对 `POST /auth/sso` 接受 `SsoVerifier.allowedOrigin` 的完整 origin。
+`isTrustedRequest()` 先验证 Gateway Host；仅 `POST /auth/sso` 接受 `SsoVerifier.allowedOrigin` 的完整 origin，以支持受信任 IdP 的跨站表单。
 
 规则：
 
@@ -349,7 +344,7 @@ export class SsoVerifier {
 
 ### 表单解析
 
-新增受限 `readForm()`：
+受限 `readForm()`：
 
 - 只接受 `application/x-www-form-urlencoded`。
 - body 上限 8 KiB。
@@ -437,7 +432,7 @@ enabled = true
 
 ### `src/gateway-cli.ts`
 
-增加：
+当前参数：
 
 ```text
 --sso-public-key <entry...>        each entry uses kid=/absolute/key.pem
@@ -462,7 +457,7 @@ enabled = true
 - `init-admin` 保持不变，但明确创建 `auth_source=local` 管理员。
 - 删除或隐藏普通 `create-user` 的生产指导；如果保留命令，只允许显式迁移/测试用途。
 - `reset-password` 只允许 `auth_source=local`。
-- 新增显式 `link-sso-user`，按数据库迁移章节执行。
+- `link-sso-user` 用于按数据库模型显式绑定已有普通用户。
 
 ### 部署文件
 
@@ -478,7 +473,7 @@ enabled = true
 
 -----
 
-## 测试方案
+## 验证覆盖范围
 
 ### `test/sso.test.ts`
 
@@ -495,7 +490,7 @@ enabled = true
 
 ### `test/auth-local.test.ts`
 
-增加：
+覆盖：
 
 - 版本 1 数据库迁移到版本 2 后保留所有用户、Session、Runtime 和审计记录。
 - 外部用户首次创建后固定为 `role=user`。
@@ -510,7 +505,7 @@ enabled = true
 
 ### `test/gateway.test.ts`
 
-增加：
+覆盖：
 
 - 可信运维平台 Origin 的有效表单返回 `303 /` 和普通 Cookie。
 - 错误/缺失 Origin、错误 Host、JSON body、额外字段、超大 body 拒绝。
@@ -524,7 +519,7 @@ enabled = true
 
 ### CLI 测试
 
-增加显式账号绑定测试：
+显式账号绑定测试覆盖：
 
 - 普通本地用户可以绑定一次外部 subject。
 - 管理员、已绑定用户、重复 subject 和不存在用户拒绝。
@@ -556,26 +551,15 @@ git diff --check
 
 -----
 
-## 实施顺序
+## 维护与发布验证
 
-实现模型按以下顺序工作：
+维护者发布新版本时，使用 [发布验收](open-source-release/04-release-validation.md) 记录实际执行的单元、集成、打包和安全检查。涉及数据库 Schema 或认证配置的部署，必须先停止服务并执行一致性备份，再按 [生产部署](open-source-release/03-production-deployment.md#升级与回滚) 的安装、启动和验证顺序操作。
 
-1. 备份测试 `gateway.sqlite`、WAL/SHM 和 `data/users/`，记录当前 dirty worktree。
-2. 增加 `jose` 依赖和 `src/sso.ts`，先完成 JWT 单元测试。
-3. 实现 SQLite 版本 2 迁移和外部用户方法，完成迁移测试。
-4. 拆分普通用户 Cookie与管理员 Cookie，完成双入口测试。
-5. 实现 `/auth/sso` 的 Origin、表单、JWT、jti 和 Session 流程。
-6. 增加 CLI 参数、公钥加载和部署配置。
-7. 更新管理员页面和 README 的登录/部署说明。
-8. 运行全部插件单元测试、typecheck、build 和 diff check。
-9. 使用真实 Harness 做双用户 Runtime 集成测试。
-10. 与运维平台测试环境联调。
-
-不要先改 Runtime Manager 或 Harness Bundle。SSO 完成后的身份必须沿用现有内部 UUID 路由。
+DSH 兼容性由 [compatibility.json](../compatibility.json) 和真实 Runtime 集成测试共同定义。新增 DSH 版本前，先在临时 home 中验证 Profile、Runtime Cookie、HTTP RPC、Remote WebSocket 和双用户隔离；未验证的版本不得加入支持列表。
 
 ## 验收标准
 
-以下条件全部满足才算插件侧完成：
+以下条件描述当前认证实现必须持续满足的行为：
 
 - Gateway 仅接受 EdDSA、已配置 `kid`、固定 issuer/audience 和不超过 60 秒的 token。
 - 相同 token 在同一 Gateway 进程中只能交换一次。
@@ -621,4 +605,4 @@ data/users/
 
 ## Dev Note
 
-本文件是待实施方案，不代表 SSO、数据库版本 2 或管理员双 Cookie 已经存在。实现完成后应把稳定认证行为移入 README，把设计取舍记录到项目自己的决策文档，并删除已完成的迁移清单。
+本文是当前协议参考，不是迁移脚本或在线升级指南。生产升级不调用已禁用的 `upgrade` 命令，统一执行停止服务、`backup`、新版本 `install`、启动服务和验证。
