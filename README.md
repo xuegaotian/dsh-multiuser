@@ -173,7 +173,46 @@ JWT 要求：
 - Claims：`iss`（issuer）、`aud`（audience）、`sub`（UUID）、`preferred_username`、`name`、`jti`（UUID，单次使用）、`iat=nbf`、`exp`。
 - token 生命周期不超过 60 秒，且不得携带 `role` / `admin` / `permissions` 等特权 claims。
 
-管理员永远只能通过本地密码登录，SSO JWT 不能创建或提升管理员。完整的协议与集成说明见 [docs/sso-integration-plan.md](docs/sso-integration-plan.md)。
+管理员永远只能通过本地密码登录，SSO JWT 不能创建或提升管理员。完整的协议与集成说明见 [docs/sso-integration.md](docs/sso-integration.md)。
+
+### 接入外部 IdP
+
+Gateway 的 SSO 入口不绑定任何特定厂商或平台，任何能够签发符合上述要求的 Ed25519 JWT 的系统都可以作为身份源，例如企业 IdP、统一认证中心，或自建的运维 / 门户平台。
+
+集成方（IdP 或平台侧）需要完成三件事：
+
+1. **签发短期 JWT**：使用 Ed25519 私钥签发，`alg=EdDSA`，`kid` 与 Gateway 已配置的公钥一致，生命周期不超过 60 秒，并且每次签发使用新的 `jti`（单次使用，Gateway 会原子消费）。
+2. **提供公钥**：把 Ed25519 公钥（PEM 格式 SPKI）以 `<kid>=<绝对路径>` 的形式交给 Gateway 的 `--sso-public-key`。私钥**永远不要**部署到 Gateway 主机。
+3. **引导用户提交 token**：在平台页面中以 `POST` 表单把 JWT 提交到 `https://<gateway-host>/auth/sso`，并确保来源与该 Gateway 的 `--sso-origin` 一致。
+
+最小可用的接入检查：
+
+```sh
+# 1. 生成一对测试用 Ed25519 密钥（生产环境使用你的 IdP 自己签发的那对）
+#    用 Node 生成，避免依赖 OpenSSL 版本：部分平台（如 macOS 自带 LibreSSL）
+#    不支持 Ed25519，openssl genpkey -algorithm Ed25519 会报
+#    "Algorithm Ed25519 not found"。
+node -e '
+const { generateKeyPairSync } = require("node:crypto");
+const fs = require("node:fs");
+const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+fs.writeFileSync("idp-private.pem", privateKey.export({ type: "pkcs8", format: "pem" }));
+fs.writeFileSync("idp-public.pem", publicKey.export({ type: "spki", format: "pem" }));
+'
+
+# 2. 带 SSO 参数启动 Gateway（或写进 install 的 --sso-* 参数）
+#    --sso-public-key my-kid=/etc/dsh-multiuser/keys/idp-public.pem \
+#    --sso-issuer my-idp --sso-audience dsh-multiuser --sso-origin https://idp.example.com
+
+# 3. 确认 SSO 配置被 doctor 认定为完整
+dsh-multiuser doctor --dsh-command <dsh 路径> --db <db> --data-root <users> \
+  --profile-source <app>/profiles/user-runtime \
+  --sso-public-key my-kid=/etc/dsh-multiuser/keys/idp-public.pem \
+  --sso-issuer my-idp --sso-audience dsh-multiuser --sso-origin https://idp.example.com
+# 期望：SSO_CONFIG: SSO fully configured
+```
+
+未配置 SSO 时 Gateway 仍可启动，但普通用户无法登录（`doctor` 的 `SSO_CONFIG` 会失败并明确提示），此时只能使用本地管理员账号访问 `/admin`。
 
 ### 绑定已有本地用户到 SSO 身份
 

@@ -116,7 +116,7 @@ node-version: ['22.19.0', '24']
 
 已完成：
 
-- 把 [SSO 集成方案](../sso-integration-plan.md) 从 `proposed` 计划改成当前 SSO 协议与 IdP 接入参考，删除已经完成的“待实施”叙述。
+- 把 [SSO 集成方案](../sso-integration.md) 从 `proposed` 计划改成当前 SSO 协议与 IdP 接入参考，删除已经完成的“待实施”叙述。
 - 明确 [DSH 0.1.2 迁移文档](../upgrading-to-dsh-0.1.2-alpha.1.md) 是历史迁移记录，或者将仍有效内容并入当前兼容文档后删除该文件。
 - 更新发布手册首页中已经过期的缺口，例如 health/readiness 和发布字段已经实现，不能继续描述为完全缺失。
 - 增加 `.github/ISSUE_TEMPLATE/`、Pull Request 模板和 `CHANGELOG.md`。

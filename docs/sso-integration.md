@@ -9,7 +9,7 @@ last_verified: 2026-09-17
 
 ## Summary
 
-本文记录当前 SSO 普通用户登录、独立本地管理员登录、JWT 校验、用户映射、Runtime Cookie 交换和回滚约束。Gateway 接收浏览器 POST 的 60 秒 Ed25519 JWT，验证后按 `issuer + subject` 查找或创建普通用户，再复用现有 Gateway Session、Runtime Manager 和 Harness Runtime Cookie 交换。管理员使用独立路由和独立 Cookie 登录 `/admin`，SSO JWT 永远不能创建或提升管理员。本文以某个内部运维平台作为示例 IdP，但协议适用于任意签发 Ed25519 JWT 的 IdP。
+本文记录当前 SSO 普通用户登录、独立本地管理员登录、JWT 校验、用户映射、Runtime Cookie 交换和回滚约束。Gateway 接收浏览器 POST 的 60 秒 Ed25519 JWT，验证后按 `issuer + subject` 查找或创建普通用户，再复用现有 Gateway Session、Runtime Manager 和 Harness Runtime Cookie 交换。管理员使用独立路由和独立 Cookie 登录 `/admin`，SSO JWT 永远不能创建或提升管理员。本文以任意签发 Ed25519 JWT 的 IdP 为接入对象，协议不绑定特定厂商。
 
 ## Table of Contents
 
@@ -38,13 +38,13 @@ Gateway 接受两种认证来源，但每条路由只接受一种明确的会话
 
 | 入口 | 身份来源 | 允许角色 | 登录结果 |
 |---|---|---|---|
-| `POST /auth/sso` | 运维平台 Ed25519 JWT | 仅 `user` | 设置普通用户 Cookie，`303 /` |
+| `POST /auth/sso` | IdP Ed25519 JWT | 仅 `user` | 设置普通用户 Cookie，`303 /` |
 | `GET /admin/login` | Gateway 本地账号 | 仅 `admin` | 显示管理员登录页 |
 | `POST /admin/auth/login` | Gateway 本地 Argon2id 密码 | 仅 `admin` | 设置管理员 Cookie，返回成功 |
 
 当前行为：
 
-- 运维平台用户首次登录时即时创建普通 Gateway 用户。
+- IdP 用户首次登录时即时创建普通 Gateway 用户。
 - 后续登录按 `issuer + subject` 找到同一个 Gateway UUID。
 - Runtime Manager 继续只接收 Gateway UUID，不接收用户名或 JWT subject。
 - 普通用户和管理员可以在同一浏览器中同时保有独立会话。
@@ -52,8 +52,8 @@ Gateway 接受两种认证来源，但每条路由只接受一种明确的会话
 
 非目标：
 
-- 本阶段不接受运维平台角色作为管理员授权依据。
-- 本阶段不实现运维平台主动撤销 Gateway Session。
+- 本阶段不接受 IdP 角色作为管理员授权依据。
+- 本阶段不实现 IdP 主动撤销 Gateway Session。
 - 本阶段不修改 DeepSeek Harness 源码。
 - 本阶段不把 Gateway Session 当作 Harness Runtime Cookie；两层认证继续分离。
 
@@ -75,7 +75,7 @@ Gateway 接受两种认证来源，但每条路由只接受一种明确的会话
 
 ## 固定 JWT 协议
 
-Gateway 与运维平台必须实现完全相同的协议。字段或算法变化需要同时修改两份方案和两边测试。
+Gateway 与 IdP 必须实现完全相同的协议。字段或算法变化需要同时修改两份方案和两边测试。
 
 ### JWT 头部
 
@@ -142,7 +142,7 @@ Referrer-Policy: no-referrer
 ## 认证流程
 
 ```text
-运维平台页面
+IdP 页面
   -> POST JWT 到 /auth/sso
   -> Gateway 校验 Host 和该端点专用 Origin
   -> Gateway 校验 Ed25519 签名、kid、issuer、audience、时间和 claims
@@ -356,7 +356,7 @@ export class SsoVerifier {
 
 处理顺序固定为：
 
-1. 验证 Gateway Host 和运维平台 Origin。
+1. 验证 Gateway Host 和 IdP Origin。
 2. 读取受限表单。
 3. 验证 JWT。
 4. 原子消费 `jti`；重复 token 返回 `401`。
@@ -407,7 +407,7 @@ enabled = true
 
 路由授权：
 
-- `/` 和普通静态代理使用普通 Session；没有普通 Session 时显示“请从运维平台进入”页面。
+- `/` 和普通静态代理使用普通 Session；没有普通 Session 时显示“请从 IdP 进入”页面。
 - `/api/*` 和 `/api/remote.mux` 只接受普通 Session。
 - `/admin/login` 对未登录管理员开放。
 - `/admin/*` 只接受管理员 Session。
@@ -461,7 +461,7 @@ enabled = true
 
 ### 部署文件
 
-修改 `deploy/gateway.env.example` 和 `deploy/dsh-multiuser.service`，加入公钥路径、issuer、audience、运维平台 origin 和 SSO Session TTL。公钥可以部署到 `/etc/dsh-multiuser/keys/`，权限允许 Gateway 服务账号读取；私钥永远不部署到 Gateway 主机。
+修改 `deploy/gateway.env.example` 和 `deploy/dsh-multiuser.service`，加入公钥路径、issuer、audience、IdP origin 和 SSO Session TTL。公钥可以部署到 `/etc/dsh-multiuser/keys/`，权限允许 Gateway 服务账号读取；私钥永远不部署到 Gateway 主机。
 
 生产拓扑要求：
 
@@ -507,7 +507,7 @@ enabled = true
 
 覆盖：
 
-- 可信运维平台 Origin 的有效表单返回 `303 /` 和普通 Cookie。
+- 可信 IdP Origin 的有效表单返回 `303 /` 和普通 Cookie。
 - 错误/缺失 Origin、错误 Host、JSON body、额外字段、超大 body 拒绝。
 - token 失败时不创建用户、Session、Runtime 记录或目录。
 - SSO 用户即使用户名为 `admin` 仍是普通用户。
@@ -564,7 +564,7 @@ DSH 兼容性由 [compatibility.json](../compatibility.json) 和真实 Runtime �
 - Gateway 仅接受 EdDSA、已配置 `kid`、固定 issuer/audience 和不超过 60 秒的 token。
 - 相同 token 在同一 Gateway 进程中只能交换一次。
 - 外部身份只按 issuer/subject 映射，用户名变化不改变内部 UUID。
-- 运维平台 SSO 用户只能获得普通用户角色。
+- IdP SSO 用户只能获得普通用户角色。
 - 本地管理员入口、密码、Cookie 和管理路由保持可用，并与普通 Session 隔离。
 - 普通 Cookie不能访问管理员接口，管理员 Cookie不能访问普通 Runtime API。
 - 无效 token 不产生用户、Session、Runtime 记录或目录。
@@ -585,11 +585,11 @@ data/users/
 
 记录插件提交号、DeepSeek Harness 提交号、`pnpm-lock.yaml` 和数据库 `PRAGMA user_version`。先在数据库副本上执行迁移并验证管理员登录、用户列表和已有 Runtime 记录。
 
-上线顺序：部署接受公钥和 SSO 路由的 Gateway，验证本地管理员登录，再部署运维平台 Server 签发接口，最后开放运维平台菜单。先灰度一个角色和两个测试用户。
+上线顺序：部署接受公钥和 SSO 路由的 Gateway，验证本地管理员登录，再部署 IdP Server 签发接口，最后开放 IdP 菜单。先灰度一个角色和两个测试用户。
 
-回滚时先关闭运维平台菜单和签发接口，再停止 Gateway 和所有 Runtime，恢复旧 app、SQLite 及其 WAL/SHM 和 `data/users/` 的一致备份。版本 1 代码不能打开已经迁移的版本 2 数据库，因此禁止只回滚代码不恢复数据库。
+回滚时先关闭 IdP 菜单和签发接口，再停止 Gateway 和所有 Runtime，恢复旧 app、SQLite 及其 WAL/SHM 和 `data/users/` 的一致备份。版本 1 代码不能打开已经迁移的版本 2 数据库，因此禁止只回滚代码不恢复数据库。
 
-密钥轮换时先配置新旧两个 `kid` 公钥，再切换运维平台私钥；等待旧 token 的 60 秒生命周期结束后移除旧公钥。
+密钥轮换时先配置新旧两个 `kid` 公钥，再切换 IdP 私钥；等待旧 token 的 60 秒生命周期结束后移除旧公钥。
 
 ## 禁止事项
 
@@ -597,7 +597,7 @@ data/users/
 - 禁止按用户名、姓名、目录名或 JWT `jti` 选择 Runtime。
 - 禁止接受 HMAC、`alg=none` 或 token 自带算法。
 - 禁止让 SSO claims 创建、绑定或提升管理员。
-- 禁止把运维平台 `sessionID`、JWT、Gateway Cookie 或 Runtime Cookie写入日志和审计。
+- 禁止把 IdP `sessionID`、JWT、Gateway Cookie 或 Runtime Cookie写入日志和审计。
 - 禁止为 SSO 放宽全部 Gateway Origin 或启用 `Access-Control-Allow-Origin: *`。
 - 禁止自动把现有同名本地用户与 SSO 用户合并。
 - 禁止在无数据库和用户目录一致备份时迁移或回滚。
